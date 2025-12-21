@@ -34,10 +34,10 @@ defmodule NxEigen.DocTest do
   doctest Nx,
     except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ [
       :moduledoc,
-      # Statistical
-      mode: 2,
-      variance: 2,
-      standard_deviation: 2,
+      # Statistical functions
+      mode: 2,  # Has slice stride edge cases
+      variance: 2,  # Broadcast issue with mean result
+      standard_deviation: 2,  # Depends on variance
       # Argmax/argmin with tie_break
       argmax: 2,
       argmin: 2,

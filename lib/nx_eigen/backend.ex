@@ -426,6 +426,8 @@ defmodule NxEigen.Backend do
 
   @impl true
   def concatenate(out, tensors, axis) do
+    # Ensure all tensors have the same type
+    tensors = Enum.map(tensors, &maybe_upcast(&1, out.type))
     states = Enum.map(tensors, & &1.data.state)
     state = NxEigen.NIF.concatenate(states, axis)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}

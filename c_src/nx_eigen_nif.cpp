@@ -1096,82 +1096,86 @@ fine::ResourcePtr<EigenTensor>
 concatenate_nif(ErlNifEnv *env,
                 std::vector<fine::ResourcePtr<EigenTensor>> tensors,
                 int64_t axis) {
-  if (tensors.empty()) {
-    throw std::runtime_error("Cannot concatenate empty list of tensors");
-  }
+  try {
+    if (tensors.empty()) {
+      throw std::runtime_error("Cannot concatenate empty list of tensors");
+    }
 
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = tensors[0]->shape;
-  result->shape[axis] = 0;
-  for (const auto &t : tensors) {
-    result->shape[axis] += t->shape[axis];
-  }
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = tensors[0]->shape;
+    result->shape[axis] = 0;
+    for (const auto &t : tensors) {
+      result->shape[axis] += t->shape[axis];
+    }
 
-  std::visit(
-      [&](auto &first_mat) {
-        using T = typename std::decay_t<decltype(first_mat)>;
-        auto &res_mat = result->data.emplace<T>();
+    std::visit(
+        [&](auto &first_mat) {
+          using T = typename std::decay_t<decltype(first_mat)>;
+          auto &res_mat = result->data.emplace<T>();
 
-        size_t total_size = 1;
-        for (auto dim : result->shape)
-          total_size *= dim;
-        res_mat.resize(total_size);
+          size_t total_size = 1;
+          for (auto dim : result->shape)
+            total_size *= dim;
+          res_mat.resize(total_size);
 
-        // Calculate strides
-        int rank = result->shape.size();
-        std::vector<size_t> out_strides(rank);
-        size_t stride = 1;
-        for (int i = rank - 1; i >= 0; --i) {
-          out_strides[i] = stride;
-          stride *= result->shape[i];
-        }
-
-        // Copy each tensor
-        size_t offset_along_axis = 0;
-        for (const auto &tensor : tensors) {
-          auto &src_mat = std::get<T>(tensor->data);
-          std::vector<size_t> src_strides(rank);
-          size_t src_stride = 1;
+          // Calculate strides
+          int rank = result->shape.size();
+          std::vector<size_t> out_strides(rank);
+          size_t stride = 1;
           for (int i = rank - 1; i >= 0; --i) {
-            src_strides[i] = src_stride;
-            src_stride *= tensor->shape[i];
+            out_strides[i] = stride;
+            stride *= result->shape[i];
           }
 
-          for (size_t src_idx = 0; src_idx < src_mat.size(); ++src_idx) {
-            // Decode src_idx to coordinates
-            std::vector<size_t> coords(rank);
-            size_t temp = src_idx;
-            for (int d = rank - 1; d >= 0; --d) {
-              coords[d] = temp % tensor->shape[d];
-              temp /= tensor->shape[d];
+          // Copy each tensor
+          size_t offset_along_axis = 0;
+          for (const auto &tensor : tensors) {
+            auto &src_mat = std::get<T>(tensor->data);
+            std::vector<size_t> src_strides(rank);
+            size_t src_stride = 1;
+            for (int i = rank - 1; i >= 0; --i) {
+              src_strides[i] = src_stride;
+              src_stride *= tensor->shape[i];
             }
 
-            // Add offset along concatenation axis
-            coords[axis] += offset_along_axis;
+            for (size_t src_idx = 0; src_idx < src_mat.size(); ++src_idx) {
+              // Decode src_idx to coordinates
+              std::vector<size_t> coords(rank);
+              size_t temp = src_idx;
+              for (int d = rank - 1; d >= 0; --d) {
+                coords[d] = temp % tensor->shape[d];
+                temp /= tensor->shape[d];
+              }
 
-            // Encode to output index
-            size_t out_idx = 0;
-            for (int d = 0; d < rank; ++d) {
-              out_idx += coords[d] * out_strides[d];
+              // Add offset along concatenation axis
+              coords[axis] += offset_along_axis;
+
+              // Encode to output index
+              size_t out_idx = 0;
+              for (int d = 0; d < rank; ++d) {
+                out_idx += coords[d] * out_strides[d];
+              }
+
+              // Bounds check
+              if (out_idx >= total_size) {
+                throw std::runtime_error(
+                    "concatenate_nif: computed output index " +
+                    std::to_string(out_idx) + " out of bounds (size: " +
+                    std::to_string(total_size) + ")");
+              }
+
+              res_mat[out_idx] = src_mat[src_idx];
             }
 
-            // Bounds check
-            if (out_idx >= total_size) {
-              throw std::runtime_error(
-                  "concatenate_nif: computed output index " +
-                  std::to_string(out_idx) +
-                  " out of bounds (size: " + std::to_string(total_size) + ")");
-            }
-
-            res_mat[out_idx] = src_mat[src_idx];
+            offset_along_axis += tensor->shape[axis];
           }
+        },
+        tensors[0]->data);
 
-          offset_along_axis += tensor->shape[axis];
-        }
-      },
-      tensors[0]->data);
-
-  return result;
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("concatenate_nif error: ") + e.what());
+  }
 }
 FINE_NIF(concatenate_nif, 0);
 
