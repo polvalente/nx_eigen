@@ -2389,24 +2389,40 @@ FINE_NIF(constant_nif, 0);
 
 fine::ResourcePtr<EigenTensor> eye_nif(ErlNifEnv *env, ScalarType type,
                                        std::vector<int64_t> shape) {
-  if (shape.size() != 2)
-    throw std::runtime_error("Eye is only for 2D tensors");
+  if (shape.size() < 2)
+    throw std::runtime_error("Eye requires at least 2 dimensions");
 
   auto tensor = fine::make_resource<EigenTensor>();
   tensor->shape = shape;
-  int rows = shape[0];
-  int cols = shape[1];
+  
+  // Last 2 dimensions define the identity matrix
+  int rows = shape[shape.size() - 2];
+  int cols = shape[shape.size() - 1];
+  
+  // Calculate batch size from all preceding dimensions
+  size_t batch_size = 1;
+  for (size_t i = 0; i < shape.size() - 2; ++i) {
+    batch_size *= shape[i];
+  }
+  
+  size_t matrix_elements = rows * cols;
+  size_t total_elements = batch_size * matrix_elements;
 
   auto init = [&](auto scalar_ptr) {
     using Scalar = std::decay_t<decltype(*scalar_ptr)>;
     auto &arr = tensor->data.emplace<FlatArray<Scalar>>();
-    // Construct Matrix to use setIdentity, then map to Array
+    arr.resize(total_elements);
+    
+    // Create identity matrix template
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> mat(
         rows, cols);
     mat.setIdentity();
-    // Copy data
-    arr.resize(rows * cols);
-    std::memcpy(arr.data(), mat.data(), rows * cols * sizeof(Scalar));
+    
+    // Copy identity matrix to each batch
+    for (size_t batch = 0; batch < batch_size; ++batch) {
+      std::memcpy(arr.data() + batch * matrix_elements, mat.data(), 
+                  matrix_elements * sizeof(Scalar));
+    }
   };
 
   switch (type) {

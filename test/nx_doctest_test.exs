@@ -13,7 +13,10 @@ defmodule NxEigen.DocTest do
       tensor: 2,
       # bf16 type tests
       real: 1,
-      imag: 1
+      imag: 1,
+      # f16 type tests
+      sigil_MAT: 2,
+      sigil_VEC: 2,
   ]
 
   @precision_sensitive [
@@ -53,13 +56,6 @@ defmodule NxEigen.DocTest do
       clip: 3,
       # Put operations
       put_slice: 3,
-      # Concatenate
-      concatenate: 2,
-      # Reflection
-      reflect: 2,
-      # Sigil operations
-      sigil_MAT: 2,
-      sigil_VEC: 2,
       # Logsumexp
       logsumexp: 2,
       # Operations with issues
@@ -75,9 +71,7 @@ defmodule NxEigen.DocTest do
       fft2: 2,
       ifft2: 2,
       # Convolution
-      conv: 3,
-      # Eye
-      eye: 2
+      conv: 3
     ]
 
   doctest Nx.LinAlg,
