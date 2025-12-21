@@ -593,25 +593,29 @@ defmodule NxEigen.Backend do
   # Window operations
   @impl true
   def window_sum(out, tensor, window_dimensions, opts) do
-    state = NxEigen.NIF.window_sum(tensor.data.state, window_dimensions, opts)
+    opts_list = convert_window_opts(opts)
+    state = NxEigen.NIF.window_sum(tensor.data.state, window_dimensions, opts_list)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
   @impl true
   def window_product(out, tensor, window_dimensions, opts) do
-    state = NxEigen.NIF.window_product(tensor.data.state, window_dimensions, opts)
+    opts_list = convert_window_opts(opts)
+    state = NxEigen.NIF.window_product(tensor.data.state, window_dimensions, opts_list)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
   @impl true
   def window_max(out, tensor, window_dimensions, opts) do
-    state = NxEigen.NIF.window_max(tensor.data.state, window_dimensions, opts)
+    opts_list = convert_window_opts(opts)
+    state = NxEigen.NIF.window_max(tensor.data.state, window_dimensions, opts_list)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
   @impl true
   def window_min(out, tensor, window_dimensions, opts) do
-    state = NxEigen.NIF.window_min(tensor.data.state, window_dimensions, opts)
+    opts_list = convert_window_opts(opts)
+    state = NxEigen.NIF.window_min(tensor.data.state, window_dimensions, opts_list)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
@@ -626,24 +630,26 @@ defmodule NxEigen.Backend do
 
   @impl true
   def window_scatter_max(out, tensor, source, init_value, window_dimensions, opts) do
+    opts_list = convert_window_opts(opts)
     state = NxEigen.NIF.window_scatter_max(
       tensor.data.state,
       source.data.state,
       Nx.to_number(init_value),
       window_dimensions,
-      opts
+      opts_list
     )
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
   @impl true
   def window_scatter_min(out, tensor, source, init_value, window_dimensions, opts) do
+    opts_list = convert_window_opts(opts)
     state = NxEigen.NIF.window_scatter_min(
       tensor.data.state,
       source.data.state,
       Nx.to_number(init_value),
       window_dimensions,
-      opts
+      opts_list
     )
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
@@ -685,5 +691,19 @@ defmodule NxEigen.Backend do
   defp to_scalar_int(%Nx.Tensor{shape: {}} = t) do
     # Convert scalar tensor to integer
     t |> Nx.to_number() |> trunc()
+  end
+
+  # Helper to convert window options from keyword list to list of lists for NIF
+  # C++ expects: [strides, padding_flat, window_dilations]
+  # where padding_flat is [low1, high1, low2, high2, ...]
+  defp convert_window_opts(opts) do
+    strides = Keyword.get(opts, :strides, [])
+    padding = Keyword.get(opts, :padding, [])
+    window_dilations = Keyword.get(opts, :window_dilations, [])
+
+    # Convert padding from list of tuples to flat list
+    padding_flat = Enum.flat_map(padding, &Tuple.to_list/1)
+
+    [strides, padding_flat, window_dilations]
   end
 end

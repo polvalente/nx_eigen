@@ -28,7 +28,8 @@ defmodule NxEigen.DocTest do
   ]
 
   @unsupported_ops [
-    reduce: 4
+    reduce: 4,
+    window_reduce: 5
   ]
 
   @sub_byte_types [
@@ -44,16 +45,7 @@ defmodule NxEigen.DocTest do
       # Statistical functions
       mode: 2,  # Has slice stride edge cases
       variance: 2,  # Broadcast issue with mean result
-      standard_deviation: 2,  # Depends on variance
-      # Window operations (not implemented)
-      window_reduce: 5,
-      window_sum: 3,
-      window_product: 3,
-      window_max: 3,
-      window_min: 3,
-      window_mean: 3,
-      window_scatter_max: 5,
-      window_scatter_min: 5
+      standard_deviation: 2
     ]
 
   doctest Nx.LinAlg,

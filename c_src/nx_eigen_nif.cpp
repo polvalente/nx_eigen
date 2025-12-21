@@ -2046,23 +2046,99 @@ indexed_put_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 }
 FINE_NIF(indexed_put_nif, 0);
 
-// Window operations - simplified pooling operations
+// Helper to decode constant value (either number or {real, imag} tuple for
+// complex)
+struct ConstantValue {
+  double real;
+  double imag;
+
+  // Constructor for real numbers
+  ConstantValue(double r) : real(r), imag(0.0) {}
+
+  // Constructor for complex tuple
+  ConstantValue(std::tuple<double, double> c)
+      : real(std::get<0>(c)), imag(std::get<1>(c)) {}
+};
+
+// Fine decoder for ConstantValue - accepts either double or tuple
+namespace fine {
+template <> struct Decoder<ConstantValue> {
+  static ConstantValue decode(ErlNifEnv *env, const ERL_NIF_TERM &term) {
+    // Try to decode as tuple first
+    int arity;
+    const ERL_NIF_TERM *array;
+    if (enif_get_tuple(env, term, &arity, &array) && arity == 2) {
+      double real, imag;
+      if (enif_get_double(env, array[0], &real) &&
+          enif_get_double(env, array[1], &imag)) {
+        return ConstantValue(std::make_tuple(real, imag));
+      }
+    }
+
+    // Otherwise decode as number
+    double val;
+    if (enif_get_double(env, term, &val)) {
+      return ConstantValue(val);
+    }
+
+    // Try as integer
+    long ival;
+    if (enif_get_long(env, term, &ival)) {
+      return ConstantValue(static_cast<double>(ival));
+    }
+
+    throw std::runtime_error("Failed to decode ConstantValue");
+  }
+};
+} // namespace fine
+
+// Window operations - sliding window reductions
+// Helper to compute output shape for window operations
+inline std::vector<int64_t>
+compute_window_output_shape(const std::vector<int64_t> &input_shape,
+                            const std::vector<int64_t> &window_dims,
+                            const std::vector<int64_t> &strides,
+                            const std::vector<int64_t> &padding_flat,
+                            const std::vector<int64_t> &window_dilations) {
+
+  int rank = input_shape.size();
+  std::vector<int64_t> output_shape(rank);
+
+  for (int i = 0; i < rank; ++i) {
+    // padding_flat is [low0, high0, low1, high1, ...]
+    int64_t pad_low = (padding_flat.size() > i * 2) ? padding_flat[i * 2] : 0;
+    int64_t pad_high =
+        (padding_flat.size() > i * 2 + 1) ? padding_flat[i * 2 + 1] : 0;
+    int64_t padded_size = input_shape[i] + pad_low + pad_high;
+
+    // Effective window size with dilation
+    int64_t dilated_window = (window_dims[i] - 1) * window_dilations[i] + 1;
+
+    // Output size: (padded_size - dilated_window) / stride + 1
+    output_shape[i] = (padded_size - dilated_window) / strides[i] + 1;
+  }
+
+  return output_shape;
+}
+
 // Helper macro for window reduction operations
 #define WINDOW_REDUCE_SETUP()                                                  \
   auto result = fine::make_resource<EigenTensor>();                            \
-  std::vector<int64_t> strides, padding, window_dilations;                     \
+  std::vector<int64_t> strides, padding_flat, window_dilations;                \
   if (!opts.empty()) {                                                         \
     if (opts.size() > 0)                                                       \
       strides = std::vector<int64_t>(opts[0].begin(), opts[0].end());          \
     if (opts.size() > 1)                                                       \
-      padding = std::vector<int64_t>(opts[1].begin(), opts[1].end());          \
+      padding_flat = std::vector<int64_t>(opts[1].begin(), opts[1].end());     \
     if (opts.size() > 2)                                                       \
       window_dilations = std::vector<int64_t>(opts[2].begin(), opts[2].end()); \
   }                                                                            \
   if (strides.empty())                                                         \
     strides.resize(window_dims.size(), 1);                                     \
   if (window_dilations.empty())                                                \
-    window_dilations.resize(window_dims.size(), 1);
+    window_dilations.resize(window_dims.size(), 1);                            \
+  result->shape = compute_window_output_shape(                                 \
+      tensor->shape, window_dims, strides, padding_flat, window_dilations);
 
 fine::ResourcePtr<EigenTensor>
 window_sum_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
@@ -2070,16 +2146,88 @@ window_sum_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
                std::vector<std::vector<int64_t>> opts) {
   WINDOW_REDUCE_SETUP();
 
-  // For simplicity, implement basic 1D/2D window sum
-  // Full implementation would handle N-D with padding, strides, dilations
-  result->shape = tensor->shape;
+  int rank = tensor->shape.size();
+
+  // Compute input strides
+  std::vector<size_t> input_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    input_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+
+  // Compute output strides
+  std::vector<size_t> output_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    output_strides[i] = stride;
+    stride *= result->shape[i];
+  }
+
+  size_t output_size = stride;
 
   std::visit(
       [&](auto &src_mat) {
         using T = typename std::decay_t<decltype(src_mat)>;
+        using Scalar = typename T::Scalar;
         auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat; // Simplified: just copy for now
-        // TODO: Implement proper sliding window sum
+        dst_mat.resize(output_size);
+        dst_mat.setZero();
+
+        // For each output position
+        for (size_t out_idx = 0; out_idx < output_size; ++out_idx) {
+          // Compute output coordinates from linear index
+          std::vector<int64_t> out_coords(rank);
+          size_t temp = out_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            out_coords[d] = temp % result->shape[d];
+            temp /= result->shape[d];
+          }
+
+          Scalar sum = 0;
+
+          // Iterate over the window
+          std::vector<int64_t> window_coords(rank, 0);
+          std::function<void(int)> iterate_window = [&](int dim) {
+            if (dim == rank) {
+              // Compute input coordinate for this window position
+              std::vector<int64_t> in_coords(rank);
+              bool valid = true;
+
+              for (int d = 0; d < rank; ++d) {
+                int64_t pad_low =
+                    (padding_flat.size() > d * 2) ? padding_flat[d * 2] : 0;
+                int64_t in_coord = out_coords[d] * strides[d] +
+                                   window_coords[d] * window_dilations[d] -
+                                   pad_low;
+
+                if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                  valid = false;
+                  break;
+                }
+                in_coords[d] = in_coord;
+              }
+
+              if (valid) {
+                // Compute linear index in input
+                size_t in_idx = 0;
+                for (int d = 0; d < rank; ++d) {
+                  in_idx += in_coords[d] * input_strides[d];
+                }
+                sum += src_mat[in_idx];
+              }
+              return;
+            }
+
+            for (int64_t w = 0; w < window_dims[dim]; ++w) {
+              window_coords[dim] = w;
+              iterate_window(dim + 1);
+            }
+          };
+
+          iterate_window(0);
+          dst_mat[out_idx] = sum;
+        }
       },
       tensor->data);
 
@@ -2092,13 +2240,81 @@ window_product_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
                    std::vector<int64_t> window_dims,
                    std::vector<std::vector<int64_t>> opts) {
   WINDOW_REDUCE_SETUP();
-  result->shape = tensor->shape;
+
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> input_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    input_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+
+  std::vector<size_t> output_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    output_strides[i] = stride;
+    stride *= result->shape[i];
+  }
+
+  size_t output_size = stride;
 
   std::visit(
       [&](auto &src_mat) {
         using T = typename std::decay_t<decltype(src_mat)>;
+        using Scalar = typename T::Scalar;
         auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
+        dst_mat.resize(output_size);
+
+        for (size_t out_idx = 0; out_idx < output_size; ++out_idx) {
+          std::vector<int64_t> out_coords(rank);
+          size_t temp = out_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            out_coords[d] = temp % result->shape[d];
+            temp /= result->shape[d];
+          }
+
+          Scalar product = 1;
+
+          std::vector<int64_t> window_coords(rank, 0);
+          std::function<void(int)> iterate_window = [&](int dim) {
+            if (dim == rank) {
+              std::vector<int64_t> in_coords(rank);
+              bool valid = true;
+
+              for (int d = 0; d < rank; ++d) {
+                int64_t pad_low =
+                    (padding_flat.size() > d * 2) ? padding_flat[d * 2] : 0;
+                int64_t in_coord = out_coords[d] * strides[d] +
+                                   window_coords[d] * window_dilations[d] -
+                                   pad_low;
+
+                if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                  valid = false;
+                  break;
+                }
+                in_coords[d] = in_coord;
+              }
+
+              if (valid) {
+                size_t in_idx = 0;
+                for (int d = 0; d < rank; ++d) {
+                  in_idx += in_coords[d] * input_strides[d];
+                }
+                product *= src_mat[in_idx];
+              }
+              return;
+            }
+
+            for (int64_t w = 0; w < window_dims[dim]; ++w) {
+              window_coords[dim] = w;
+              iterate_window(dim + 1);
+            }
+          };
+
+          iterate_window(0);
+          dst_mat[out_idx] = product;
+        }
       },
       tensor->data);
 
@@ -2111,13 +2327,106 @@ window_max_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
                std::vector<int64_t> window_dims,
                std::vector<std::vector<int64_t>> opts) {
   WINDOW_REDUCE_SETUP();
-  result->shape = tensor->shape;
+
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> input_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    input_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+
+  std::vector<size_t> output_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    output_strides[i] = stride;
+    stride *= result->shape[i];
+  }
+
+  size_t output_size = stride;
 
   std::visit(
       [&](auto &src_mat) {
         using T = typename std::decay_t<decltype(src_mat)>;
+        using Scalar = typename T::Scalar;
         auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
+        dst_mat.resize(output_size);
+
+        for (size_t out_idx = 0; out_idx < output_size; ++out_idx) {
+          std::vector<int64_t> out_coords(rank);
+          size_t temp = out_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            out_coords[d] = temp % result->shape[d];
+            temp /= result->shape[d];
+          }
+
+          Scalar max_val;
+          bool found_any = false;
+
+          std::vector<int64_t> window_coords(rank, 0);
+          std::function<void(int)> iterate_window = [&](int dim) {
+            if (dim == rank) {
+              std::vector<int64_t> in_coords(rank);
+              bool valid = true;
+
+              for (int d = 0; d < rank; ++d) {
+                int64_t pad_low =
+                    (padding_flat.size() > d * 2) ? padding_flat[d * 2] : 0;
+                int64_t in_coord = out_coords[d] * strides[d] +
+                                   window_coords[d] * window_dilations[d] -
+                                   pad_low;
+
+                if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                  valid = false;
+                  break;
+                }
+                in_coords[d] = in_coord;
+              }
+
+              if (valid) {
+                size_t in_idx = 0;
+                for (int d = 0; d < rank; ++d) {
+                  in_idx += in_coords[d] * input_strides[d];
+                }
+                if constexpr (std::is_same_v<Scalar, std::complex<float>> ||
+                              std::is_same_v<Scalar, std::complex<double>>) {
+                  // For complex, use magnitude comparison
+                  if (!found_any ||
+                      std::abs(src_mat[in_idx]) > std::abs(max_val)) {
+                    max_val = src_mat[in_idx];
+                    found_any = true;
+                  }
+                } else {
+                  if (!found_any || src_mat[in_idx] > max_val) {
+                    max_val = src_mat[in_idx];
+                    found_any = true;
+                  }
+                }
+              }
+              return;
+            }
+
+            for (int64_t w = 0; w < window_dims[dim]; ++w) {
+              window_coords[dim] = w;
+              iterate_window(dim + 1);
+            }
+          };
+
+          iterate_window(0);
+          if (found_any) {
+            dst_mat[out_idx] = max_val;
+          } else {
+            // No valid elements in window - use type's min value
+            if constexpr (std::is_integral_v<Scalar>) {
+              dst_mat[out_idx] = std::numeric_limits<Scalar>::lowest();
+            } else if constexpr (std::is_floating_point_v<Scalar>) {
+              dst_mat[out_idx] = -std::numeric_limits<Scalar>::infinity();
+            } else {
+              dst_mat[out_idx] = Scalar(0);
+            }
+          }
+        }
       },
       tensor->data);
 
@@ -2130,13 +2439,106 @@ window_min_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
                std::vector<int64_t> window_dims,
                std::vector<std::vector<int64_t>> opts) {
   WINDOW_REDUCE_SETUP();
-  result->shape = tensor->shape;
+
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> input_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    input_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+
+  std::vector<size_t> output_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    output_strides[i] = stride;
+    stride *= result->shape[i];
+  }
+
+  size_t output_size = stride;
 
   std::visit(
       [&](auto &src_mat) {
         using T = typename std::decay_t<decltype(src_mat)>;
+        using Scalar = typename T::Scalar;
         auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
+        dst_mat.resize(output_size);
+
+        for (size_t out_idx = 0; out_idx < output_size; ++out_idx) {
+          std::vector<int64_t> out_coords(rank);
+          size_t temp = out_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            out_coords[d] = temp % result->shape[d];
+            temp /= result->shape[d];
+          }
+
+          Scalar min_val;
+          bool found_any = false;
+
+          std::vector<int64_t> window_coords(rank, 0);
+          std::function<void(int)> iterate_window = [&](int dim) {
+            if (dim == rank) {
+              std::vector<int64_t> in_coords(rank);
+              bool valid = true;
+
+              for (int d = 0; d < rank; ++d) {
+                int64_t pad_low =
+                    (padding_flat.size() > d * 2) ? padding_flat[d * 2] : 0;
+                int64_t in_coord = out_coords[d] * strides[d] +
+                                   window_coords[d] * window_dilations[d] -
+                                   pad_low;
+
+                if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                  valid = false;
+                  break;
+                }
+                in_coords[d] = in_coord;
+              }
+
+              if (valid) {
+                size_t in_idx = 0;
+                for (int d = 0; d < rank; ++d) {
+                  in_idx += in_coords[d] * input_strides[d];
+                }
+                if constexpr (std::is_same_v<Scalar, std::complex<float>> ||
+                              std::is_same_v<Scalar, std::complex<double>>) {
+                  // For complex, use magnitude comparison
+                  if (!found_any ||
+                      std::abs(src_mat[in_idx]) < std::abs(min_val)) {
+                    min_val = src_mat[in_idx];
+                    found_any = true;
+                  }
+                } else {
+                  if (!found_any || src_mat[in_idx] < min_val) {
+                    min_val = src_mat[in_idx];
+                    found_any = true;
+                  }
+                }
+              }
+              return;
+            }
+
+            for (int64_t w = 0; w < window_dims[dim]; ++w) {
+              window_coords[dim] = w;
+              iterate_window(dim + 1);
+            }
+          };
+
+          iterate_window(0);
+          if (found_any) {
+            dst_mat[out_idx] = min_val;
+          } else {
+            // No valid elements in window - use type's max value
+            if constexpr (std::is_integral_v<Scalar>) {
+              dst_mat[out_idx] = std::numeric_limits<Scalar>::max();
+            } else if constexpr (std::is_floating_point_v<Scalar>) {
+              dst_mat[out_idx] = std::numeric_limits<Scalar>::infinity();
+            } else {
+              dst_mat[out_idx] = Scalar(0);
+            }
+          }
+        }
       },
       tensor->data);
 
@@ -2144,19 +2546,157 @@ window_min_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 }
 FINE_NIF(window_min_nif, 0);
 
-fine::ResourcePtr<EigenTensor>
-window_scatter_max_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-                       fine::ResourcePtr<EigenTensor> source, double init_value,
-                       std::vector<int64_t> window_dims,
-                       std::vector<std::vector<int64_t>> opts) {
+fine::ResourcePtr<EigenTensor> window_scatter_max_nif(
+    ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+    fine::ResourcePtr<EigenTensor> source, ConstantValue init_value,
+    std::vector<int64_t> window_dims, std::vector<std::vector<int64_t>> opts) {
   auto result = fine::make_resource<EigenTensor>();
+
+  std::vector<int64_t> strides, padding_flat, window_dilations;
+  if (!opts.empty()) {
+    if (opts.size() > 0)
+      strides = std::vector<int64_t>(opts[0].begin(), opts[0].end());
+    if (opts.size() > 1)
+      padding_flat = std::vector<int64_t>(opts[1].begin(), opts[1].end());
+    if (opts.size() > 2)
+      window_dilations = std::vector<int64_t>(opts[2].begin(), opts[2].end());
+  }
+  if (strides.empty())
+    strides.resize(window_dims.size(), 1);
+  if (window_dilations.empty())
+    window_dilations.resize(window_dims.size(), 1);
+
+  // Output shape is same as tensor shape
   result->shape = tensor->shape;
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> tensor_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    tensor_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+  size_t tensor_size = stride;
+
+  std::vector<size_t> source_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    source_strides[i] = stride;
+    stride *= source->shape[i];
+  }
+  size_t source_size = stride;
 
   std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
+      [&](auto &tensor_mat) {
+        using T = typename std::decay_t<decltype(tensor_mat)>;
+        using Scalar = typename T::Scalar;
         auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
+        dst_mat.resize(tensor_size);
+
+        // Initialize with init_value
+        for (size_t i = 0; i < tensor_size; ++i) {
+          if constexpr (std::is_same_v<Scalar, std::complex<float>>) {
+            dst_mat[i] = std::complex<float>(init_value.real, init_value.imag);
+          } else if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+            dst_mat[i] = std::complex<double>(init_value.real, init_value.imag);
+          } else {
+            dst_mat[i] = static_cast<Scalar>(init_value.real);
+          }
+        }
+
+        // For each position in source tensor, find the max in the corresponding
+        // window and scatter the source value to that position
+        std::visit(
+            [&](auto &source_mat) {
+              using SourceScalar =
+                  typename std::decay_t<decltype(source_mat)>::Scalar;
+
+              // Only process if types match
+              if constexpr (std::is_same_v<Scalar, SourceScalar>) {
+                for (size_t src_idx = 0; src_idx < source_size; ++src_idx) {
+                  // Compute source coordinates (corresponds to a window)
+                  std::vector<int64_t> src_coords(rank);
+                  size_t temp = src_idx;
+                  for (int d = rank - 1; d >= 0; --d) {
+                    src_coords[d] = temp % source->shape[d];
+                    temp /= source->shape[d];
+                  }
+
+                  // Find the maximum value and its position in this window
+                  Scalar max_val;
+                  std::vector<int64_t> max_pos(rank);
+                  bool found_any = false;
+
+                  std::vector<int64_t> window_coords(rank, 0);
+                  std::function<void(int)> iterate_window = [&](int dim) {
+                    if (dim == rank) {
+                      // Compute input coordinate for this window position
+                      std::vector<int64_t> in_coords(rank);
+                      bool valid = true;
+
+                      for (int d = 0; d < rank; ++d) {
+                        int64_t pad_low = (padding_flat.size() > d * 2)
+                                              ? padding_flat[d * 2]
+                                              : 0;
+                        int64_t in_coord =
+                            src_coords[d] * strides[d] +
+                            window_coords[d] * window_dilations[d] - pad_low;
+
+                        if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                          valid = false;
+                          break;
+                        }
+                        in_coords[d] = in_coord;
+                      }
+
+                      if (valid) {
+                        size_t in_idx = 0;
+                        for (int d = 0; d < rank; ++d) {
+                          in_idx += in_coords[d] * tensor_strides[d];
+                        }
+
+                        if constexpr (std::is_same_v<Scalar,
+                                                     std::complex<float>> ||
+                                      std::is_same_v<Scalar,
+                                                     std::complex<double>>) {
+                          if (!found_any || std::abs(tensor_mat[in_idx]) >=
+                                                std::abs(max_val)) {
+                            max_val = tensor_mat[in_idx];
+                            max_pos = in_coords;
+                            found_any = true;
+                          }
+                        } else {
+                          if (!found_any || tensor_mat[in_idx] >= max_val) {
+                            max_val = tensor_mat[in_idx];
+                            max_pos = in_coords;
+                            found_any = true;
+                          }
+                        }
+                      }
+                      return;
+                    }
+
+                    for (int64_t w = 0; w < window_dims[dim]; ++w) {
+                      window_coords[dim] = w;
+                      iterate_window(dim + 1);
+                    }
+                  };
+
+                  iterate_window(0);
+
+                  // Scatter source value to the max position (add if
+                  // overlapping)
+                  if (found_any) {
+                    size_t out_idx = 0;
+                    for (int d = 0; d < rank; ++d) {
+                      out_idx += max_pos[d] * tensor_strides[d];
+                    }
+                    dst_mat[out_idx] += source_mat[src_idx];
+                  }
+                }
+              }
+            },
+            source->data);
       },
       tensor->data);
 
@@ -2164,19 +2704,156 @@ window_scatter_max_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 }
 FINE_NIF(window_scatter_max_nif, 0);
 
-fine::ResourcePtr<EigenTensor>
-window_scatter_min_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-                       fine::ResourcePtr<EigenTensor> source, double init_value,
-                       std::vector<int64_t> window_dims,
-                       std::vector<std::vector<int64_t>> opts) {
+fine::ResourcePtr<EigenTensor> window_scatter_min_nif(
+    ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+    fine::ResourcePtr<EigenTensor> source, ConstantValue init_value,
+    std::vector<int64_t> window_dims, std::vector<std::vector<int64_t>> opts) {
   auto result = fine::make_resource<EigenTensor>();
+
+  std::vector<int64_t> strides, padding_flat, window_dilations;
+  if (!opts.empty()) {
+    if (opts.size() > 0)
+      strides = std::vector<int64_t>(opts[0].begin(), opts[0].end());
+    if (opts.size() > 1)
+      padding_flat = std::vector<int64_t>(opts[1].begin(), opts[1].end());
+    if (opts.size() > 2)
+      window_dilations = std::vector<int64_t>(opts[2].begin(), opts[2].end());
+  }
+  if (strides.empty())
+    strides.resize(window_dims.size(), 1);
+  if (window_dilations.empty())
+    window_dilations.resize(window_dims.size(), 1);
+
   result->shape = tensor->shape;
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> tensor_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    tensor_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+  size_t tensor_size = stride;
+
+  std::vector<size_t> source_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    source_strides[i] = stride;
+    stride *= source->shape[i];
+  }
+  size_t source_size = stride;
 
   std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
+      [&](auto &tensor_mat) {
+        using T = typename std::decay_t<decltype(tensor_mat)>;
+        using Scalar = typename T::Scalar;
         auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
+        dst_mat.resize(tensor_size);
+
+        // Initialize with init_value
+        for (size_t i = 0; i < tensor_size; ++i) {
+          if constexpr (std::is_same_v<Scalar, std::complex<float>>) {
+            dst_mat[i] = std::complex<float>(init_value.real, init_value.imag);
+          } else if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+            dst_mat[i] = std::complex<double>(init_value.real, init_value.imag);
+          } else {
+            dst_mat[i] = static_cast<Scalar>(init_value.real);
+          }
+        }
+
+        // For each position in source, scatter to corresponding window in
+        // output Assume source and tensor have the same type
+        std::visit(
+            [&](auto &source_mat) {
+              using SourceScalar =
+                  typename std::decay_t<decltype(source_mat)>::Scalar;
+
+              // Only process if types match
+              if constexpr (std::is_same_v<Scalar, SourceScalar>) {
+                for (size_t src_idx = 0; src_idx < source_size; ++src_idx) {
+                  // Compute source coordinates (corresponds to a window)
+                  std::vector<int64_t> src_coords(rank);
+                  size_t temp = src_idx;
+                  for (int d = rank - 1; d >= 0; --d) {
+                    src_coords[d] = temp % source->shape[d];
+                    temp /= source->shape[d];
+                  }
+
+                  // Find the minimum value and its position in this window
+                  Scalar min_val;
+                  std::vector<int64_t> min_pos(rank);
+                  bool found_any = false;
+
+                  std::vector<int64_t> window_coords(rank, 0);
+                  std::function<void(int)> iterate_window = [&](int dim) {
+                    if (dim == rank) {
+                      // Compute input coordinate for this window position
+                      std::vector<int64_t> in_coords(rank);
+                      bool valid = true;
+
+                      for (int d = 0; d < rank; ++d) {
+                        int64_t pad_low = (padding_flat.size() > d * 2)
+                                              ? padding_flat[d * 2]
+                                              : 0;
+                        int64_t in_coord =
+                            src_coords[d] * strides[d] +
+                            window_coords[d] * window_dilations[d] - pad_low;
+
+                        if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                          valid = false;
+                          break;
+                        }
+                        in_coords[d] = in_coord;
+                      }
+
+                      if (valid) {
+                        size_t in_idx = 0;
+                        for (int d = 0; d < rank; ++d) {
+                          in_idx += in_coords[d] * tensor_strides[d];
+                        }
+
+                        if constexpr (std::is_same_v<Scalar,
+                                                     std::complex<float>> ||
+                                      std::is_same_v<Scalar,
+                                                     std::complex<double>>) {
+                          if (!found_any || std::abs(tensor_mat[in_idx]) <=
+                                                std::abs(min_val)) {
+                            min_val = tensor_mat[in_idx];
+                            min_pos = in_coords;
+                            found_any = true;
+                          }
+                        } else {
+                          if (!found_any || tensor_mat[in_idx] <= min_val) {
+                            min_val = tensor_mat[in_idx];
+                            min_pos = in_coords;
+                            found_any = true;
+                          }
+                        }
+                      }
+                      return;
+                    }
+
+                    for (int64_t w = 0; w < window_dims[dim]; ++w) {
+                      window_coords[dim] = w;
+                      iterate_window(dim + 1);
+                    }
+                  };
+
+                  iterate_window(0);
+
+                  // Scatter source value to the min position (add if
+                  // overlapping)
+                  if (found_any) {
+                    size_t out_idx = 0;
+                    for (int d = 0; d < rank; ++d) {
+                      out_idx += min_pos[d] * tensor_strides[d];
+                    }
+                    dst_mat[out_idx] += source_mat[src_idx];
+                  }
+                }
+              }
+            },
+            source->data);
       },
       tensor->data);
 
@@ -2764,53 +3441,6 @@ static auto __nif_registration_conv =
     fine::Registration::register_nif({"conv_nif", 3, conv_nif, 0});
 
 // Constant/Eye/Iota
-// Helper to decode constant value (either number or {real, imag} tuple for
-// complex)
-struct ConstantValue {
-  double real;
-  double imag;
-
-  // Constructor for real numbers
-  ConstantValue(double r) : real(r), imag(0.0) {}
-
-  // Constructor for complex tuple
-  ConstantValue(std::tuple<double, double> c)
-      : real(std::get<0>(c)), imag(std::get<1>(c)) {}
-};
-
-// Fine decoder for ConstantValue - accepts either double or tuple
-namespace fine {
-template <> struct Decoder<ConstantValue> {
-  static ConstantValue decode(ErlNifEnv *env, const ERL_NIF_TERM &term) {
-    // Try to decode as tuple first
-    int arity;
-    const ERL_NIF_TERM *array;
-    if (enif_get_tuple(env, term, &arity, &array) && arity == 2) {
-      double real, imag;
-      if (enif_get_double(env, array[0], &real) &&
-          enif_get_double(env, array[1], &imag)) {
-        return ConstantValue(std::make_tuple(real, imag));
-      }
-    }
-
-    // Otherwise decode as number
-    double val;
-    if (enif_get_double(env, term, &val)) {
-      return ConstantValue(val);
-    }
-
-    // Try as integer
-    long ival;
-    if (enif_get_long(env, term, &ival)) {
-      return ConstantValue(static_cast<double>(ival));
-    }
-
-    throw std::runtime_error(
-        "ConstantValue must be a number or {real, imag} tuple");
-  }
-};
-} // namespace fine
-
 fine::ResourcePtr<EigenTensor> constant_nif(ErlNifEnv *env, ScalarType type,
                                             std::vector<int64_t> shape,
                                             ConstantValue value) {

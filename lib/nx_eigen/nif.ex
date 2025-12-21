@@ -191,25 +191,35 @@ defmodule NxEigen.NIF do
   defp indexed_put_nif(_tensor, _indices, _updates, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
   # Window operations
-  def window_sum(tensor, window_dims, opts), do: window_sum_nif(tensor, window_dims, opts)
+  def window_sum(tensor, window_dims, opts) do
+    window_sum_nif(tensor, Tuple.to_list(window_dims), opts)
+  end
   defp window_sum_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_product(tensor, window_dims, opts), do: window_product_nif(tensor, window_dims, opts)
+  def window_product(tensor, window_dims, opts) do
+    window_product_nif(tensor, Tuple.to_list(window_dims), opts)
+  end
   defp window_product_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_max(tensor, window_dims, opts), do: window_max_nif(tensor, window_dims, opts)
+  def window_max(tensor, window_dims, opts) do
+    window_max_nif(tensor, Tuple.to_list(window_dims), opts)
+  end
   defp window_max_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_min(tensor, window_dims, opts), do: window_min_nif(tensor, window_dims, opts)
+  def window_min(tensor, window_dims, opts) do
+    window_min_nif(tensor, Tuple.to_list(window_dims), opts)
+  end
   defp window_min_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_scatter_max(tensor, source, init_val, window_dims, opts),
-    do: window_scatter_max_nif(tensor, source, init_val, window_dims, opts)
+  def window_scatter_max(tensor, source, init_val, window_dims, opts) do
+    window_scatter_max_nif(tensor, source, init_val, Tuple.to_list(window_dims), opts)
+  end
   defp window_scatter_max_nif(_tensor, _source, _init_val, _window_dims, _opts),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_scatter_min(tensor, source, init_val, window_dims, opts),
-    do: window_scatter_min_nif(tensor, source, init_val, window_dims, opts)
+  def window_scatter_min(tensor, source, init_val, window_dims, opts) do
+    window_scatter_min_nif(tensor, source, init_val, Tuple.to_list(window_dims), opts)
+  end
   defp window_scatter_min_nif(_tensor, _source, _init_val, _window_dims, _opts),
     do: :erlang.nif_error(:nif_not_loaded)
 
