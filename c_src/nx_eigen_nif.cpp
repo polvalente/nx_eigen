@@ -3085,7 +3085,7 @@ struct ArgMaxOp {
     if (std::isnan(current)) return false;
     // If val is also NaN, normal comparison (which will be false, so no update unless tie_break_high with NaN==NaN)
     if (std::isnan(val)) return false;
-    
+
     if (tie_break_high) {
       return val >= current;  // >= to prefer higher index on ties
     } else {
@@ -3106,7 +3106,7 @@ struct ArgMinOp {
     if (std::isnan(current)) return false;
     // If val is also NaN, normal comparison (which will be false, so no update unless tie_break_high with NaN==NaN)
     if (std::isnan(val)) return false;
-    
+
     if (tie_break_high) {
       return val <= current;  // <= to prefer higher index on ties
     } else {
@@ -3266,10 +3266,16 @@ fine::ResourcePtr<EigenTensor> slice_nif(ErlNifEnv *env,
                                          std::vector<int64_t> lengths,
                                          std::vector<int64_t> strides) {
   auto result = fine::make_resource<EigenTensor>();
-  result->shape = lengths;
+
+  // Calculate output shape: ceil(lengths[i] / strides[i])
+  // lengths is the input length before stride application
+  int rank = tensor->shape.size();
+  result->shape.resize(rank);
+  for (int i = 0; i < rank; ++i) {
+    result->shape[i] = (lengths[i] + strides[i] - 1) / strides[i];
+  }
 
   // Calculate input and output strides for indexing
-  int rank = tensor->shape.size();
   std::vector<size_t> in_strides(rank);
   size_t stride = 1;
   for (int i = rank - 1; i >= 0; --i) {
@@ -3281,7 +3287,7 @@ fine::ResourcePtr<EigenTensor> slice_nif(ErlNifEnv *env,
   stride = 1;
   for (int i = rank - 1; i >= 0; --i) {
     out_strides[i] = stride;
-    stride *= lengths[i];
+    stride *= result->shape[i];
   }
   size_t total_out = stride;
 
@@ -3298,8 +3304,8 @@ fine::ResourcePtr<EigenTensor> slice_nif(ErlNifEnv *env,
           size_t in_idx = 0;
 
           for (int d = rank - 1; d >= 0; --d) {
-            int64_t out_coord = temp % lengths[d];
-            temp /= lengths[d];
+            int64_t out_coord = temp % result->shape[d];
+            temp /= result->shape[d];
 
             // Map to input coordinate using start + out_coord * stride
             int64_t in_coord = start_indices[d] + out_coord * strides[d];
