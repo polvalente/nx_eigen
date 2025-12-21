@@ -36,11 +36,6 @@ defmodule NxEigen.DocTest do
       :moduledoc,
       # Pad with interior padding
       pad: 3,
-      # Reductions
-      all: 2,
-      any: 2,
-      sum: 2,
-      product: 2,
       # Comparison
       all_close: 3,
       # Statistical

@@ -2993,10 +2993,11 @@ fine::ResourcePtr<EigenTensor> all_nif(ErlNifEnv *env,
   std::visit(
       [&](auto &in_arr) {
         using T = typename std::decay_t<decltype(in_arr)>::Scalar;
-        auto &out_arr = result->data.emplace<FlatArray<T>>();
+        // All/any always return u8
+        auto &out_arr = result->data.emplace<FlatArray<uint8_t>>();
         out_arr.resize(total_out);
         for (size_t i = 0; i < total_out; ++i)
-          out_arr[i] = static_cast<T>(1);
+          out_arr[i] = 1;
         for (size_t i = 0; i < in_arr.size(); ++i) {
           size_t out_idx = 0;
           for (int d = 0; d < in_rank; ++d) {
@@ -3008,10 +3009,10 @@ fine::ResourcePtr<EigenTensor> all_nif(ErlNifEnv *env,
                 "all_nif: computed output index " + std::to_string(out_idx) +
                 " out of bounds (size: " + std::to_string(total_out) + ")");
           }
-          out_arr[out_idx] = (out_arr[out_idx] != static_cast<T>(0) &&
-                              in_arr[i] != static_cast<T>(0))
-                                 ? static_cast<T>(1)
-                                 : static_cast<T>(0);
+          // AND operation: if any element is 0, result is 0
+          if (in_arr[i] == static_cast<T>(0)) {
+            out_arr[out_idx] = 0;
+          }
         }
       },
       tensor->data);
@@ -3026,10 +3027,11 @@ fine::ResourcePtr<EigenTensor> any_nif(ErlNifEnv *env,
   std::visit(
       [&](auto &in_arr) {
         using T = typename std::decay_t<decltype(in_arr)>::Scalar;
-        auto &out_arr = result->data.emplace<FlatArray<T>>();
+        // All/any always return u8
+        auto &out_arr = result->data.emplace<FlatArray<uint8_t>>();
         out_arr.resize(total_out);
         for (size_t i = 0; i < total_out; ++i)
-          out_arr[i] = static_cast<T>(0);
+          out_arr[i] = 0;
         for (size_t i = 0; i < in_arr.size(); ++i) {
           size_t out_idx = 0;
           for (int d = 0; d < in_rank; ++d) {
@@ -3041,10 +3043,10 @@ fine::ResourcePtr<EigenTensor> any_nif(ErlNifEnv *env,
                 "any_nif: computed output index " + std::to_string(out_idx) +
                 " out of bounds (size: " + std::to_string(total_out) + ")");
           }
-          out_arr[out_idx] = (out_arr[out_idx] != static_cast<T>(0) ||
-                              in_arr[i] != static_cast<T>(0))
-                                 ? static_cast<T>(1)
-                                 : static_cast<T>(0);
+          // OR operation: if any element is non-zero, result is 1
+          if (in_arr[i] != static_cast<T>(0)) {
+            out_arr[out_idx] = 1;
+          }
         }
       },
       tensor->data);

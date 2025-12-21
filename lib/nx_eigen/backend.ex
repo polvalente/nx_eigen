@@ -84,8 +84,22 @@ defmodule NxEigen.Backend do
   end
 
   # Reductions
-  @reduce_ops [:sum, :product, :reduce_max, :reduce_min, :all, :any]
+  @reduce_ops [:sum, :product, :reduce_max, :reduce_min]
   for op <- @reduce_ops do
+    @impl true
+    def unquote(op)(out, tensor, opts) do
+      # If axes is nil, reduce over all dimensions
+      axes = opts[:axes] || Nx.axes(tensor)
+      # Upcast to output type if needed (e.g., s8 -> s32 for sum)
+      tensor = maybe_upcast(tensor, out.type)
+      state = apply(NxEigen.NIF, unquote(op), [tensor.data.state, axes])
+      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    end
+  end
+
+  # Logical reductions (all/any) always return u8
+  @logical_reduce_ops [:all, :any]
+  for op <- @logical_reduce_ops do
     @impl true
     def unquote(op)(out, tensor, opts) do
       # If axes is nil, reduce over all dimensions
