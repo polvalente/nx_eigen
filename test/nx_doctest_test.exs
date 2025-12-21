@@ -56,10 +56,6 @@ defmodule NxEigen.DocTest do
       clip: 3,
       # Put operations
       put_slice: 3,
-      # Logsumexp
-      logsumexp: 2,
-      # Operations with issues
-      atan2: 2,
       # Indexed operations
       indexed_add: 4,
       indexed_put: 4,

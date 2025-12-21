@@ -367,6 +367,9 @@ defmodule NxEigen.Backend do
   # Binary math ops
   @impl true
   def atan2(out, l, r) do
+    # Auto-upcast to output float type
+    l = maybe_upcast(l, out.type)
+    r = maybe_upcast(r, out.type)
     # Broadcast to output shape
     l = maybe_broadcast(l, out.shape)
     r = maybe_broadcast(r, out.shape)

@@ -297,6 +297,17 @@ template <typename T> auto safe_max(const T &a, const T &b) {
     return a.max(b);
 }
 
+template <typename T> auto safe_atan2(const T &y, const T &x) {
+  using Scalar = typename T::Scalar;
+  if constexpr (Eigen::NumTraits<Scalar>::IsComplex) {
+    throw std::runtime_error("atan2 not supported for complex types");
+  } else {
+    return y.binaryExpr(x, [](Scalar a, Scalar b) { 
+      return static_cast<Scalar>(std::atan2(a, b)); 
+    });
+  }
+}
+
 template <typename T> auto safe_ceil(const T &a) {
   if constexpr (Eigen::NumTraits<typename T::Scalar>::IsComplex)
     return a;
@@ -777,30 +788,7 @@ sign_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor) {
 FINE_NIF(sign_nif, 0);
 
 // Atan2 (real types only)
-static fine::ResourcePtr<EigenTensor>
-atan2_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
-          fine::ResourcePtr<EigenTensor> right) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = left->shape;
-  std::visit(
-      [&](auto &l_mat) {
-        using T = typename std::decay_t<decltype(l_mat)>;
-        using Scalar = typename T::Scalar;
-        auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
-        if constexpr (!Eigen::NumTraits<Scalar>::IsComplex) {
-          res_mat.resize(l_mat.size());
-          for (size_t i = 0; i < l_mat.size(); ++i) {
-            res_mat[i] = std::atan2(l_mat[i], r_mat[i]);
-          }
-        } else {
-          throw std::runtime_error("Atan2 not supported for complex types");
-        }
-      },
-      left->data);
-  return result;
-}
-FINE_NIF(atan2_nif, 0);
+NX_EIGEN_BINARY_REAL_OP(atan2_nif, safe_atan2(l_mat, r_mat));
 
 // Complex operations
 static fine::ResourcePtr<EigenTensor>
