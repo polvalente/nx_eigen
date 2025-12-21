@@ -35,10 +35,10 @@ defmodule NxEigen.DocTest do
     except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ [
       :moduledoc,
       # Slicing with tensor indices
-      # Diagonal operations (not implemented)
-      # take_diagonal: 2,
-      # make_diagonal: 2,
-      # put_diagonal: 3,
+      # Diagonal operations (require multi-dimensional gather support)
+      take_diagonal: 2,
+      make_diagonal: 2,
+      put_diagonal: 3,
       # Binary output operations
       to_binary: 2,
       to_flat_list: 2,
@@ -81,8 +81,6 @@ defmodule NxEigen.DocTest do
       slice_along_axis: 4,
       # Put operations
       put_slice: 3,
-      # Gather
-      gather: 3,
       # Concatenate
       concatenate: 2,
       # Sorting
@@ -103,9 +101,6 @@ defmodule NxEigen.DocTest do
       indexed_put: 4,
       # Custom reduce
       reduce: 4,
-      # Take operations
-      take: 3,
-      take_along_axis: 3,
       # FFT
       fft: 2,
       ifft: 2,

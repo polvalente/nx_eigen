@@ -3149,23 +3149,19 @@ select_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> pred,
 FINE_NIF(select_nif, 0);
 
 // Gather operation
-// Gather elements from tensor at specified indices along an axis
+// Gather elements from tensor using multi-dimensional indices
+// When indices has shape [..., num_axes], the last dimension specifies
+// coordinates
 fine::ResourcePtr<EigenTensor>
 gather_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
            fine::ResourcePtr<EigenTensor> indices, int64_t axis) {
   try {
     auto result = fine::make_resource<EigenTensor>();
 
-    int rank = tensor->shape.size();
+    int tensor_rank = tensor->shape.size();
+    int indices_rank = indices->shape.size();
 
-    // Validate axis
-    if (axis < 0 || axis >= rank) {
-      throw std::runtime_error("gather_nif: axis " + std::to_string(axis) +
-                               " out of range for tensor with rank " +
-                               std::to_string(rank));
-    }
-
-    // Extract indices - need to handle different integer types
+    // Extract indices as vector
     std::vector<int64_t> idx_vec;
     std::visit(
         [&](auto &idx_arr) {
@@ -3182,92 +3178,214 @@ gather_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
         },
         indices->data);
 
-    // For Nx.gather: indices is 1D and replaces the axis dimension
-    // Output shape: tensor.shape with shape[axis] replaced by indices.size()
-    result->shape = tensor->shape;
-    result->shape[axis] = idx_vec.size();
+    // Check if this is multi-dimensional gather (last dim of indices = num
+    // axes) or single-axis gather
+    int num_index_axes = indices->shape[indices_rank - 1];
+    bool is_multi_dim_gather = (num_index_axes == tensor_rank);
 
-    // Calculate total output size
-    size_t total_out = 1;
-    for (auto dim : result->shape)
-      total_out *= dim;
+    if (is_multi_dim_gather && num_index_axes > 1) {
+      // Multi-dimensional gather when gathering ALL axes (axis must be 0)
+      // indices shape [..., tensor_rank]
+      // Output shape is indices.shape[0:-1] (no non-gathered dims)
+      std::vector<int64_t> output_shape;
+      for (int i = 0; i < indices_rank - 1; ++i) {
+        output_shape.push_back(indices->shape[i]);
+      }
+      result->shape = output_shape;
 
-    // Calculate tensor strides
-    std::vector<size_t> tensor_strides(rank);
-    size_t stride = 1;
-    for (int i = rank - 1; i >= 0; --i) {
-      tensor_strides[i] = stride;
-      stride *= tensor->shape[i];
+      size_t num_gathers = idx_vec.size() / num_index_axes;
+
+      // Calculate tensor strides
+      std::vector<size_t> tensor_strides(tensor_rank);
+      size_t stride = 1;
+      for (int i = tensor_rank - 1; i >= 0; --i) {
+        tensor_strides[i] = stride;
+        stride *= tensor->shape[i];
+      }
+
+      std::visit(
+          [&](auto &tensor_arr) {
+            using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
+            auto &out_arr = result->data.emplace<FlatArray<T>>();
+            out_arr.resize(num_gathers);
+
+            for (size_t i = 0; i < num_gathers; ++i) {
+              // Get coordinates from indices (these should be for axes starting
+              // at 'axis')
+              size_t in_linear = 0;
+              for (int ax = 0; ax < num_index_axes; ++ax) {
+                int64_t coord = idx_vec[i * num_index_axes + ax];
+                int tensor_ax = axis + ax;
+
+                // Bounds check
+                if (coord < 0 || coord >= tensor->shape[tensor_ax]) {
+                  throw std::runtime_error(
+                      "gather_nif: index " + std::to_string(coord) +
+                      " out of bounds for tensor axis " +
+                      std::to_string(tensor_ax) + " with size " +
+                      std::to_string(tensor->shape[tensor_ax]));
+                }
+
+                in_linear += coord * tensor_strides[tensor_ax];
+              }
+
+              // Bounds check
+              if (in_linear >= tensor_arr.size()) {
+                throw std::runtime_error(
+                    "gather_nif: computed input index " +
+                    std::to_string(in_linear) + " out of bounds (size: " +
+                    std::to_string(tensor_arr.size()) + ")");
+              }
+
+              out_arr[i] = tensor_arr[in_linear];
+            }
+          },
+          tensor->data);
+
+    } else {
+      // General gather: indices shape is [..., num_gather_axes]
+      // Output shape is: indices.shape[:-1] +
+      // tensor.shape[axis+num_gather_axes:]
+
+      // Validate axis
+      if (axis < 0 || axis >= tensor_rank) {
+        throw std::runtime_error("gather_nif: axis " + std::to_string(axis) +
+                                 " out of range for tensor with rank " +
+                                 std::to_string(tensor_rank));
+      }
+
+      // Build output shape: indices dimensions (except last) + ALL non-gathered
+      // tensor dimensions
+      std::vector<int64_t> output_shape;
+      for (int i = 0; i < indices_rank - 1; ++i) {
+        output_shape.push_back(indices->shape[i]);
+      }
+      // Add non-gathered tensor dimensions (before gathered axes)
+      for (int i = 0; i < axis; ++i) {
+        output_shape.push_back(tensor->shape[i]);
+      }
+      // Add non-gathered tensor dimensions (after gathered axes)
+      for (int i = axis + num_index_axes; i < tensor_rank; ++i) {
+        output_shape.push_back(tensor->shape[i]);
+      }
+      result->shape = output_shape;
+
+      size_t total_out = 1;
+      for (auto dim : output_shape)
+        total_out *= dim;
+
+      // Calculate tensor strides
+      std::vector<size_t> tensor_strides(tensor_rank);
+      size_t stride = 1;
+      for (int i = tensor_rank - 1; i >= 0; --i) {
+        tensor_strides[i] = stride;
+        stride *= tensor->shape[i];
+      }
+
+      // Calculate output strides
+      int output_rank = output_shape.size();
+      std::vector<size_t> output_strides(output_rank);
+      stride = 1;
+      for (int i = output_rank - 1; i >= 0; --i) {
+        output_strides[i] = stride;
+        stride *= output_shape[i];
+      }
+
+      // Number of index tuples
+      size_t num_index_tuples = idx_vec.size() / num_index_axes;
+
+      // Collect non-gathered tensor dimensions and their sizes
+      std::vector<int64_t> non_gathered_dims;
+      std::vector<int> non_gathered_axes;
+      for (int i = 0; i < tensor_rank; ++i) {
+        if (i < axis || i >= axis + num_index_axes) {
+          non_gathered_dims.push_back(tensor->shape[i]);
+          non_gathered_axes.push_back(i);
+        }
+      }
+
+      size_t non_gathered_size = 1;
+      for (auto dim : non_gathered_dims) {
+        non_gathered_size *= dim;
+      }
+
+      std::visit(
+          [&](auto &tensor_arr) {
+            using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
+            auto &out_arr = result->data.emplace<FlatArray<T>>();
+            out_arr.resize(total_out);
+
+            // Iterate through all output elements
+            for (size_t idx_tuple_idx = 0; idx_tuple_idx < num_index_tuples;
+                 ++idx_tuple_idx) {
+              // Extract coordinates from this index tuple
+              std::vector<int64_t> gather_coords(num_index_axes);
+              for (int ax = 0; ax < num_index_axes; ++ax) {
+                gather_coords[ax] =
+                    idx_vec[idx_tuple_idx * num_index_axes + ax];
+
+                // Bounds check
+                int tensor_ax = axis + ax;
+                if (gather_coords[ax] < 0 ||
+                    gather_coords[ax] >= tensor->shape[tensor_ax]) {
+                  throw std::runtime_error(
+                      "gather_nif: index " + std::to_string(gather_coords[ax]) +
+                      " out of bounds for tensor axis " +
+                      std::to_string(tensor_ax) + " with size " +
+                      std::to_string(tensor->shape[tensor_ax]));
+                }
+              }
+
+              // For each combination of non-gathered dimensions
+              for (size_t ng_linear = 0; ng_linear < non_gathered_size;
+                   ++ng_linear) {
+                // Build full tensor coordinates
+                std::vector<int64_t> tensor_coords(tensor_rank);
+
+                // Decode non-gathered linear index to coordinates for
+                // non-gathered axes
+                size_t temp = ng_linear;
+                for (int i = (int)non_gathered_dims.size() - 1; i >= 0; --i) {
+                  int tensor_ax = non_gathered_axes[i];
+                  tensor_coords[tensor_ax] = temp % non_gathered_dims[i];
+                  temp /= non_gathered_dims[i];
+                }
+
+                // Set gathered coordinates
+                for (int ax = 0; ax < num_index_axes; ++ax) {
+                  tensor_coords[axis + ax] = gather_coords[ax];
+                }
+
+                // Encode to input linear index
+                size_t in_linear = 0;
+                for (int d = 0; d < tensor_rank; ++d) {
+                  in_linear += tensor_coords[d] * tensor_strides[d];
+                }
+
+                // Bounds check
+                if (in_linear >= tensor_arr.size()) {
+                  throw std::runtime_error(
+                      "gather_nif: computed input index " +
+                      std::to_string(in_linear) + " out of bounds (size: " +
+                      std::to_string(tensor_arr.size()) + ")");
+                }
+
+                size_t out_idx = idx_tuple_idx * non_gathered_size + ng_linear;
+                if (out_idx >= total_out) {
+                  throw std::runtime_error(
+                      "gather_nif: computed output index " +
+                      std::to_string(out_idx) + " out of bounds (size: " +
+                      std::to_string(total_out) + ")");
+                }
+
+                out_arr[out_idx] = tensor_arr[in_linear];
+              }
+            }
+          },
+          tensor->data);
     }
 
-  // Calculate output strides
-  std::vector<size_t> output_strides(rank);
-  stride = 1;
-  for (int i = rank - 1; i >= 0; --i) {
-    output_strides[i] = stride;
-    stride *= result->shape[i];
-  }
-
-  std::visit(
-      [&](auto &tensor_arr) {
-        using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
-        auto &out_arr = result->data.emplace<FlatArray<T>>();
-        out_arr.resize(total_out);
-
-        // Iterate through output and map to input using indices
-        for (size_t out_linear = 0; out_linear < total_out; ++out_linear) {
-          // Decode output linear index to coordinates
-          std::vector<size_t> out_coords(rank);
-          size_t temp = out_linear;
-          for (int d = rank - 1; d >= 0; --d) {
-            out_coords[d] = temp % result->shape[d];
-            temp /= result->shape[d];
-          }
-
-          // Map to input coordinates using indices at the gather axis
-          std::vector<size_t> in_coords = out_coords;
-          size_t idx_pos = out_coords[axis];
-
-          // Bounds check on indices array access
-          if (idx_pos >= idx_vec.size()) {
-            throw std::runtime_error("gather_nif: index position " +
-                                     std::to_string(idx_pos) +
-                                     " out of bounds for indices array size " +
-                                     std::to_string(idx_vec.size()));
-          }
-
-          int64_t gathered_idx = idx_vec[idx_pos];
-
-          // Bounds check on gathered index
-          if (gathered_idx < 0 || gathered_idx >= tensor->shape[axis]) {
-            throw std::runtime_error(
-                "gather_nif: gathered index " + std::to_string(gathered_idx) +
-                " out of bounds for axis " + std::to_string(axis) +
-                " with size " + std::to_string(tensor->shape[axis]));
-          }
-
-          in_coords[axis] = gathered_idx;
-
-          // Encode input coordinates to linear index
-          size_t in_linear = 0;
-          for (int d = 0; d < rank; ++d) {
-            in_linear += in_coords[d] * tensor_strides[d];
-          }
-
-          // Bounds check on input array access
-          if (in_linear >= tensor_arr.size()) {
-            throw std::runtime_error("gather_nif: computed input index " +
-                                     std::to_string(in_linear) +
-                                     " out of bounds (size: " +
-                                     std::to_string(tensor_arr.size()) + ")");
-          }
-
-          out_arr[out_linear] = tensor_arr[in_linear];
-        }
-      },
-      tensor->data);
-
-  return result;
+    return result;
   } catch (const std::exception &e) {
     throw std::runtime_error(std::string("gather_nif error: ") + e.what());
   }

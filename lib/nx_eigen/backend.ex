@@ -135,8 +135,14 @@ defmodule NxEigen.Backend do
 
   @impl true
   def gather(out, tensor, indices, opts) do
-    axis = opts[:axis] || 0
-    state = NxEigen.NIF.gather(tensor.data.state, indices.data.state, axis)
+    axes = opts[:axes] || [0]
+
+    # Extract the axis to gather from
+    # When indices shape is [..., num_axes], we gather using multi-dimensional coordinates
+    # Otherwise it's a single-axis gather
+    [first_axis | _] = axes
+
+    state = NxEigen.NIF.gather(tensor.data.state, indices.data.state, first_axis)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
@@ -515,13 +521,17 @@ defmodule NxEigen.Backend do
   # Advanced indexing
   @impl true
   def indexed_add(out, tensor, indices, updates, opts) do
-    state = NxEigen.NIF.indexed_add(tensor.data.state, indices.data.state, updates.data.state, opts)
+    # Extract axes from opts keyword list
+    axes = Keyword.get(opts, :axes, [])
+    state = NxEigen.NIF.indexed_add(tensor.data.state, indices.data.state, updates.data.state, axes)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
   @impl true
   def indexed_put(out, tensor, indices, updates, opts) do
-    state = NxEigen.NIF.indexed_put(tensor.data.state, indices.data.state, updates.data.state, opts)
+    # Extract axes from opts keyword list
+    axes = Keyword.get(opts, :axes, [])
+    state = NxEigen.NIF.indexed_put(tensor.data.state, indices.data.state, updates.data.state, axes)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
