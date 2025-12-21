@@ -51,9 +51,6 @@ defmodule NxEigen.DocTest do
       dot: 2,
       # Clip
       clip: 3,
-      # Advanced slicing
-      slice: 4,
-      slice_along_axis: 4,
       # Put operations
       put_slice: 3,
       # Concatenate

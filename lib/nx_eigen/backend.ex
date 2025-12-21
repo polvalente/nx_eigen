@@ -134,12 +134,16 @@ defmodule NxEigen.Backend do
   # Slicing & Indexing
   @impl true
   def slice(out, tensor, start_indices, lengths, strides) do
+    # Convert tensor indices to integers and clamp them
+    start_indices = clamp_indices(start_indices, tensor.shape, lengths)
     state = NxEigen.NIF.slice(tensor.data.state, start_indices, lengths, strides)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
   @impl true
   def put_slice(out, tensor, start_indices, slice) do
+    # Convert tensor indices to integers and clamp them
+    start_indices = clamp_indices(start_indices, tensor.shape, Tuple.to_list(slice.shape))
     state = NxEigen.NIF.put_slice(tensor.data.state, slice.data.state, start_indices)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
@@ -653,5 +657,20 @@ defmodule NxEigen.Backend do
   def conv(out, tensor, kernel, opts) do
     state = NxEigen.NIF.conv(tensor.data.state, kernel.data.state, opts)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
+  end
+
+  # Helper functions
+  defp clamp_indices(start_indices, shape, lengths) do
+    shape_list = Tuple.to_list(shape)
+    Enum.zip_with([shape_list, start_indices, lengths], fn [dim_size, idx, len] ->
+      idx = to_scalar_int(idx)
+      min(max(idx, 0), dim_size - len)
+    end)
+  end
+
+  defp to_scalar_int(n) when is_integer(n), do: n
+  defp to_scalar_int(%Nx.Tensor{shape: {}} = t) do
+    # Convert scalar tensor to integer
+    t |> Nx.to_number() |> trunc()
   end
 end
