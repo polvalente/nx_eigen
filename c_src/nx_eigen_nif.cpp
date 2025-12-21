@@ -2145,42 +2145,91 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
       [&](auto &src_mat) {
         using SrcScalar = typename std::decay_t<decltype(src_mat)>::Scalar;
 
-        // Allocate output as complex
-        auto &out_arr = result->data.emplace<FlatArray<std::complex<double>>>();
-        out_arr.resize(src_mat.size());
+        // Calculate output size
+        size_t out_size = 1;
+        for (auto dim : result->shape) {
+          out_size *= dim;
+        }
 
-        // Simple 1D FFT using FFTW
-        if (rank == 1) {
-          fftw_complex *in = fftw_alloc_complex(n);
-          fftw_complex *out = fftw_alloc_complex(n);
+        // Allocate output as complex float (c64)
+        auto &out_arr = result->data.emplace<FlatArray<std::complex<float>>>();
+        out_arr.resize(out_size);
 
-          // Copy input data
-          for (size_t i = 0; i < n && i < src_mat.size(); ++i) {
-            if constexpr (Eigen::NumTraits<SrcScalar>::IsComplex) {
-              in[i][0] = src_mat[i].real();
-              in[i][1] = src_mat[i].imag();
-            } else {
-              in[i][0] = static_cast<double>(src_mat[i]);
-              in[i][1] = 0.0;
+        // Compute strides for both input and output
+        std::vector<size_t> in_strides(rank);
+        std::vector<size_t> out_strides(rank);
+        in_strides[rank - 1] = 1;
+        out_strides[rank - 1] = 1;
+        for (int i = rank - 2; i >= 0; --i) {
+          in_strides[i] = in_strides[i + 1] * tensor->shape[i + 1];
+          out_strides[i] = out_strides[i + 1] * result->shape[i + 1];
+        }
+
+        // Calculate number of FFTs to perform
+        size_t num_ffts = out_size / n;
+
+        // Allocate FFTW buffers
+        fftw_complex *in = fftw_alloc_complex(n);
+        fftw_complex *out = fftw_alloc_complex(n);
+        fftw_plan plan =
+            fftw_plan_dft_1d(n, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+
+        // Perform FFT along the specified axis for each "row"
+        for (size_t fft_idx = 0; fft_idx < num_ffts; ++fft_idx) {
+          // Compute coordinates in the non-axis dimensions
+          std::vector<size_t> coords(rank, 0);
+          size_t remaining = fft_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            if (d != axis) {
+              coords[d] = remaining % result->shape[d];
+              remaining /= result->shape[d];
+            }
+          }
+
+          // Compute base indices for input and output
+          size_t src_base = 0;
+          size_t dst_base = 0;
+          for (int d = 0; d < rank; ++d) {
+            if (d != axis) {
+              src_base += coords[d] * in_strides[d];
+              dst_base += coords[d] * out_strides[d];
+            }
+          }
+
+          // Zero-initialize input buffer
+          for (size_t i = 0; i < n; ++i) {
+            in[i][0] = 0.0;
+            in[i][1] = 0.0;
+          }
+
+          // Copy input data along the axis
+          size_t src_len = tensor->shape[axis];
+          for (size_t i = 0; i < n && i < src_len; ++i) {
+            size_t src_idx = src_base + i * in_strides[axis];
+            if (src_idx < src_mat.size()) {
+              if constexpr (Eigen::NumTraits<SrcScalar>::IsComplex) {
+                in[i][0] = src_mat[src_idx].real();
+                in[i][1] = src_mat[src_idx].imag();
+              } else {
+                in[i][0] = static_cast<double>(src_mat[src_idx]);
+                in[i][1] = 0.0;
+              }
             }
           }
 
           // Execute FFT
-          fftw_plan plan =
-              fftw_plan_dft_1d(n, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
           fftw_execute(plan);
 
           // Copy output
           for (size_t i = 0; i < n; ++i) {
-            out_arr[i] = std::complex<double>(out[i][0], out[i][1]);
+            size_t dst_idx = dst_base + i * out_strides[axis];
+            out_arr[dst_idx] = std::complex<float>(out[i][0], out[i][1]);
           }
-
-          fftw_destroy_plan(plan);
-          fftw_free(in);
-          fftw_free(out);
-        } else {
-          throw std::runtime_error("Multi-dimensional FFT not yet implemented");
         }
+
+        fftw_destroy_plan(plan);
+        fftw_free(in);
+        fftw_free(out);
       },
       tensor->data);
 
@@ -2208,41 +2257,92 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
       [&](auto &src_mat) {
         using SrcScalar = typename std::decay_t<decltype(src_mat)>::Scalar;
 
-        auto &out_arr = result->data.emplace<FlatArray<std::complex<double>>>();
-        out_arr.resize(src_mat.size());
+        // Calculate output size
+        size_t out_size = 1;
+        for (auto dim : result->shape) {
+          out_size *= dim;
+        }
 
-        if (rank == 1) {
-          fftw_complex *in = fftw_alloc_complex(n);
-          fftw_complex *out = fftw_alloc_complex(n);
+        // Allocate output as complex float (c64)
+        auto &out_arr = result->data.emplace<FlatArray<std::complex<float>>>();
+        out_arr.resize(out_size);
 
-          // Copy input data
-          for (size_t i = 0; i < n && i < src_mat.size(); ++i) {
-            if constexpr (Eigen::NumTraits<SrcScalar>::IsComplex) {
-              in[i][0] = src_mat[i].real();
-              in[i][1] = src_mat[i].imag();
-            } else {
-              in[i][0] = static_cast<double>(src_mat[i]);
-              in[i][1] = 0.0;
+        // Compute strides for both input and output
+        std::vector<size_t> in_strides(rank);
+        std::vector<size_t> out_strides(rank);
+        in_strides[rank - 1] = 1;
+        out_strides[rank - 1] = 1;
+        for (int i = rank - 2; i >= 0; --i) {
+          in_strides[i] = in_strides[i + 1] * tensor->shape[i + 1];
+          out_strides[i] = out_strides[i + 1] * result->shape[i + 1];
+        }
+
+        // Calculate number of IFFTs to perform
+        size_t num_ffts = out_size / n;
+
+        // Allocate FFTW buffers
+        fftw_complex *in = fftw_alloc_complex(n);
+        fftw_complex *out = fftw_alloc_complex(n);
+        fftw_plan plan =
+            fftw_plan_dft_1d(n, in, out, FFTW_BACKWARD, FFTW_ESTIMATE);
+
+        // Perform IFFT along the specified axis for each "row"
+        for (size_t fft_idx = 0; fft_idx < num_ffts; ++fft_idx) {
+          // Compute coordinates in the non-axis dimensions
+          std::vector<size_t> coords(rank, 0);
+          size_t remaining = fft_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            if (d != axis) {
+              coords[d] = remaining % result->shape[d];
+              remaining /= result->shape[d];
+            }
+          }
+
+          // Compute base indices for input and output
+          size_t src_base = 0;
+          size_t dst_base = 0;
+          for (int d = 0; d < rank; ++d) {
+            if (d != axis) {
+              src_base += coords[d] * in_strides[d];
+              dst_base += coords[d] * out_strides[d];
+            }
+          }
+
+          // Zero-initialize input buffer
+          for (size_t i = 0; i < n; ++i) {
+            in[i][0] = 0.0;
+            in[i][1] = 0.0;
+          }
+
+          // Copy input data along the axis
+          size_t src_len = tensor->shape[axis];
+          for (size_t i = 0; i < n && i < src_len; ++i) {
+            size_t src_idx = src_base + i * in_strides[axis];
+            if (src_idx < src_mat.size()) {
+              if constexpr (Eigen::NumTraits<SrcScalar>::IsComplex) {
+                in[i][0] = src_mat[src_idx].real();
+                in[i][1] = src_mat[src_idx].imag();
+              } else {
+                in[i][0] = static_cast<double>(src_mat[src_idx]);
+                in[i][1] = 0.0;
+              }
             }
           }
 
           // Execute IFFT
-          fftw_plan plan =
-              fftw_plan_dft_1d(n, in, out, FFTW_BACKWARD, FFTW_ESTIMATE);
           fftw_execute(plan);
 
           // Copy output (and normalize)
           for (size_t i = 0; i < n; ++i) {
-            out_arr[i] = std::complex<double>(out[i][0] / n, out[i][1] / n);
+            size_t dst_idx = dst_base + i * out_strides[axis];
+            out_arr[dst_idx] =
+                std::complex<float>(out[i][0] / n, out[i][1] / n);
           }
-
-          fftw_destroy_plan(plan);
-          fftw_free(in);
-          fftw_free(out);
-        } else {
-          throw std::runtime_error(
-              "Multi-dimensional IFFT not yet implemented");
         }
+
+        fftw_destroy_plan(plan);
+        fftw_free(in);
+        fftw_free(out);
       },
       tensor->data);
 

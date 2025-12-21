@@ -64,12 +64,7 @@ defmodule NxEigen.DocTest do
       indexed_add: 4,
       indexed_put: 4,
       # Custom reduce
-      reduce: 4,
-      # FFT
-      fft: 2,
-      ifft: 2,
-      fft2: 2,
-      ifft2: 2,
+      reduce: 4
     ]
 
   doctest Nx.LinAlg,
