@@ -34,10 +34,6 @@ defmodule NxEigen.DocTest do
   doctest Nx,
     except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ [
       :moduledoc,
-      # Pad with interior padding
-      pad: 3,
-      # Comparison
-      all_close: 3,
       # Statistical
       mode: 2,
       variance: 2,

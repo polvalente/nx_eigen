@@ -79,7 +79,9 @@ defmodule NxEigen.Backend do
       %Complex{re: r, im: i} -> {r, i}
       n when is_number(n) -> n
     end
-    state = NxEigen.NIF.pad(tensor.data.state, val, config)
+    # Convert config tuples to lists for NIF
+    config_lists = Enum.map(config, &Tuple.to_list/1)
+    state = NxEigen.NIF.pad(tensor.data.state, val, config_lists)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 

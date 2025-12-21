@@ -2787,6 +2787,7 @@ pad_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
         for (size_t i = 0; i < total_in; ++i) {
           size_t temp = i;
           size_t out_idx = 0;
+          bool skip_element = false;
 
           for (int d = 0; d < rank; ++d) {
             size_t coord = temp / input_strides[d];
@@ -2796,9 +2797,22 @@ pad_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
             int64_t interior = config[d][2];
 
             // Map input coord to output coord
-            size_t out_coord = low + coord * (interior + 1);
+            int64_t out_coord = low + coord * (interior + 1);
+
+            // Check if this coordinate is within the output bounds
+            if (out_coord < 0 || out_coord >= output_shape[d]) {
+              skip_element = true;
+              break;
+            }
+
             out_idx += out_coord * output_strides[d];
           }
+
+          // Skip if element is outside output bounds
+          if (skip_element) {
+            continue;
+          }
+
           if (out_idx >= total_out) {
             throw std::runtime_error(
                 "pad_nif: computed output index " + std::to_string(out_idx) +
