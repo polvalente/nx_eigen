@@ -180,6 +180,10 @@ defmodule NxEigen.Backend do
   # Linear Algebra
   @impl true
   def dot(out, left, contract_axes1, batch_axes1, right, contract_axes2, batch_axes2) do
+    # Convert inputs to output type if needed
+    left = if left.type != out.type, do: Nx.as_type(left, out.type), else: left
+    right = if right.type != out.type, do: Nx.as_type(right, out.type), else: right
+
     state = NxEigen.NIF.dot(
       left.data.state,
       contract_axes1,
@@ -423,8 +427,11 @@ defmodule NxEigen.Backend do
   # Utility operations
   @impl true
   def clip(out, tensor, min, max) do
-    min_val = Nx.to_number(min)
-    max_val = Nx.to_number(max)
+    # Convert tensor to output type if needed
+    tensor = if tensor.type != out.type, do: Nx.as_type(tensor, out.type), else: tensor
+
+    min_val = Nx.to_number(min) * 1.0
+    max_val = Nx.to_number(max) * 1.0
     state = NxEigen.NIF.clip(tensor.data.state, min_val, max_val)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end

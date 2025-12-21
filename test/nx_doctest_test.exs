@@ -53,11 +53,7 @@ defmodule NxEigen.DocTest do
       window_min: 3,
       window_mean: 3,
       window_scatter_max: 5,
-      window_scatter_min: 5,
-      # Dot product with complex batching
-      dot: 2,
-      # Clip
-      clip: 3
+      window_scatter_min: 5
     ]
 
   doctest Nx.LinAlg,

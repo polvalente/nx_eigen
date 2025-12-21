@@ -1004,7 +1004,8 @@ clip_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor, double min_val,
         if constexpr (!Eigen::NumTraits<Scalar>::IsComplex) {
           Scalar min_s = static_cast<Scalar>(min_val);
           Scalar max_s = static_cast<Scalar>(max_val);
-          res_mat = mat.max(min_s).min(max_s);
+          res_mat.resize(mat.size());
+          res_mat = mat.cwiseMax(min_s).cwiseMin(max_s);
         } else {
           throw std::runtime_error("Clip not supported for complex types");
         }
@@ -4253,6 +4254,41 @@ dot_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
 
   int left_rank = left->shape.size();
   int right_rank = right->shape.size();
+
+  // Special case: 1D x 1D vector dot product (inner product)
+  if (left_rank == 1 && right_rank == 1 && batch_axes1.empty() &&
+      batch_axes2.empty() && contract_axes1.size() == 1 &&
+      contract_axes2.size() == 1 && contract_axes1[0] == 0 &&
+      contract_axes2[0] == 0) {
+    // This is a simple dot product: sum(left[i] * right[i])
+    int64_t N = left->shape[0];
+
+    result->shape = {}; // Scalar result
+
+    try {
+      std::visit(
+          [&](auto &left_arr) {
+            using T = typename std::decay_t<decltype(left_arr)>::Scalar;
+            auto &right_arr = std::get<FlatArray<T>>(right->data);
+            auto &out_arr = result->data.emplace<FlatArray<T>>();
+            out_arr.resize(1);
+
+            // Use Eigen's dot product
+            Eigen::Map<Eigen::Matrix<T, Eigen::Dynamic, 1>> left_vec(
+                left_arr.data(), N);
+            Eigen::Map<Eigen::Matrix<T, Eigen::Dynamic, 1>> right_vec(
+                right_arr.data(), N);
+
+            out_arr[0] = left_vec.dot(right_vec);
+          },
+          left->data);
+    } catch (const std::bad_variant_access &e) {
+      throw std::runtime_error(
+          "Type mismatch in dot product - tensors must have the same type");
+    }
+
+    return result;
+  }
 
   // Simple case: 2D x 2D matrix multiplication with no batch dimensions
   if (left_rank == 2 && right_rank == 2 && batch_axes1.empty() &&
