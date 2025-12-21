@@ -56,10 +56,10 @@ endif
 
 LIB_NAME = priv/libnx_eigen.so
 
-all: eigen fftw priv $(LIB_NAME)
+all: check-deps priv $(LIB_NAME)
 
-# Auto-download Eigen if directory doesn't exist
-eigen:
+# Check dependencies without rebuilding
+check-deps:
 	@if [ ! -d "$(EIGEN_DIR)" ]; then \
 		echo "Downloading Eigen $(EIGEN_VERSION)..."; \
 		curl -L -k https://gitlab.com/libeigen/eigen/-/archive/$(EIGEN_VERSION)/eigen-$(EIGEN_VERSION).tar.gz | tar xz || \
@@ -67,9 +67,6 @@ eigen:
 	else \
 		echo "Using Eigen from $(EIGEN_DIR)"; \
 	fi
-
-# Download and build FFTW locally if needed
-fftw:
 	@if [ "$(FFTW_DIR)" = "$(FFTW_INSTALL_DIR)" ] && [ ! -d "$(FFTW_INSTALL_DIR)" ]; then \
 		echo "Downloading and building FFTW $(FFTW_VERSION) locally..."; \
 		curl -L http://www.fftw.org/fftw-$(FFTW_VERSION).tar.gz | tar xz && \
@@ -84,13 +81,13 @@ fftw:
 	fi
 
 priv:
-	mkdir -p priv
+	@mkdir -p priv
 
-$(LIB_NAME): c_src/nx_eigen_nif.cpp
+$(LIB_NAME): c_src/nx_eigen_nif.cpp | check-deps priv
 	$(CXX) $(CFLAGS) $(LDFLAGS) c_src/nx_eigen_nif.cpp -o $(LIB_NAME)
 
 clean:
 	rm -rf priv $(LIB_NAME) eigen-$(EIGEN_VERSION)* fftw-$(FFTW_VERSION) fftw-$(FFTW_VERSION)-install
 
-.PHONY: all clean eigen fftw
+.PHONY: all clean check-deps
 

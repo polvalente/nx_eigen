@@ -16,8 +16,6 @@ defmodule NxEigen.DocTest do
       tensor: 2,
       # Slicing with tensor indices
       # Diagonal operations (not implemented)
-      tril: 2,
-      triu: 2,
       take_diagonal: 2,
       make_diagonal: 2,
       put_diagonal: 3,
@@ -39,8 +37,6 @@ defmodule NxEigen.DocTest do
       logical_and: 2,
       logical_or: 2,
       logical_xor: 2,
-      # Select operation
-      select: 3,
       # Math operations on integer types
       acosh: 1,
       asinh: 1,

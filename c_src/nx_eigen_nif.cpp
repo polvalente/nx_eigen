@@ -3062,25 +3062,38 @@ select_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> pred,
         },
         pred->data);
 
+    // Verify that on_true and on_false have the same variant type
+    if (on_true->data.index() != on_false->data.index()) {
+      throw std::runtime_error(
+          "select_nif: on_true and on_false must have the same type");
+    }
+
     std::visit(
         [&](auto &true_arr) {
           using T = typename std::decay_t<decltype(true_arr)>::Scalar;
           auto &out_arr = result->data.emplace<FlatArray<T>>();
           out_arr.resize(total_size);
 
+          // Safe get with type checking
+          if (!std::holds_alternative<FlatArray<T>>(on_false->data)) {
+            throw std::runtime_error(
+                "select_nif: type mismatch between on_true and on_false");
+          }
           auto &false_arr = std::get<FlatArray<T>>(on_false->data);
 
+          // All inputs should have same size after backend broadcasting
+          if (pred_vec.size() != total_size || true_arr.size() != total_size ||
+              false_arr.size() != total_size) {
+            throw std::runtime_error(
+                "select_nif: size mismatch - expected all inputs to be "
+                "broadcast to same size " +
+                std::to_string(total_size) +
+                ", got pred: " + std::to_string(pred_vec.size()) +
+                ", true: " + std::to_string(true_arr.size()) +
+                ", false: " + std::to_string(false_arr.size()));
+          }
+
           for (size_t i = 0; i < total_size; ++i) {
-            // Bounds checks
-            if (i >= pred_vec.size() || i >= true_arr.size() ||
-                i >= false_arr.size()) {
-              throw std::runtime_error(
-                  "select_nif: index " + std::to_string(i) +
-                  " out of bounds (pred size: " +
-                  std::to_string(pred_vec.size()) +
-                  ", true size: " + std::to_string(true_arr.size()) +
-                  ", false size: " + std::to_string(false_arr.size()) + ")");
-            }
             // Non-zero predicate means true
             out_arr[i] = (pred_vec[i] != 0) ? true_arr[i] : false_arr[i];
           }

@@ -122,6 +122,13 @@ defmodule NxEigen.Backend do
 
   @impl true
   def select(out, pred, on_true, on_false) do
+    # Ensure on_true and on_false have the same type
+    on_true = maybe_upcast(on_true, out.type)
+    on_false = maybe_upcast(on_false, out.type)
+    # Broadcast all inputs to output shape
+    pred = maybe_broadcast(pred, out.shape)
+    on_true = maybe_broadcast(on_true, out.shape)
+    on_false = maybe_broadcast(on_false, out.shape)
     state = NxEigen.NIF.select(pred.data.state, on_true.data.state, on_false.data.state)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
