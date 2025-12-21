@@ -64,8 +64,6 @@ check-deps:
 		echo "Downloading Eigen $(EIGEN_VERSION)..."; \
 		curl -L -k https://gitlab.com/libeigen/eigen/-/archive/$(EIGEN_VERSION)/eigen-$(EIGEN_VERSION).tar.gz | tar xz || \
 		(echo "Failed to download Eigen. Please install manually or set EIGEN_DIR=/path/to/eigen"; exit 1); \
-	else \
-		echo "Using Eigen from $(EIGEN_DIR)"; \
 	fi
 	@if [ "$(FFTW_DIR)" = "$(FFTW_INSTALL_DIR)" ] && [ ! -d "$(FFTW_INSTALL_DIR)" ]; then \
 		echo "Downloading and building FFTW $(FFTW_VERSION) locally..."; \
@@ -74,10 +72,6 @@ check-deps:
 		./configure --prefix=$(FFTW_INSTALL_DIR) --enable-shared --disable-fortran && \
 		$(MAKE) && \
 		$(MAKE) install; \
-	elif [ -n "$(FFTW_LIB)" ]; then \
-		echo "Using system FFTW"; \
-	else \
-		echo "Using FFTW from $(FFTW_DIR)"; \
 	fi
 
 priv:
