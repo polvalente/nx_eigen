@@ -2250,29 +2250,357 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
 }
 FINE_NIF(ifft_nif, 0);
 
-// Convolution - basic implementation
-fine::ResourcePtr<EigenTensor>
-conv_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-         fine::ResourcePtr<EigenTensor> kernel,
-         std::vector<std::vector<int64_t>> opts) {
-  auto result = fine::make_resource<EigenTensor>();
+// Helper function to parse convolution options
+struct ConvOptions {
+  std::vector<int64_t> strides;
+  std::vector<std::pair<int64_t, int64_t>> padding;
+  std::vector<int64_t> input_dilation;
+  std::vector<int64_t> kernel_dilation;
+  int64_t feature_group_size;
+  int64_t batch_group_size;
+  std::vector<int64_t> input_permutation;
+  std::vector<int64_t> kernel_permutation;
+  std::vector<int64_t> output_permutation;
+};
 
-  // Simplified: just return input for now
-  // Full implementation would require proper convolution with strides, padding,
-  // etc.
-  result->shape = tensor->shape;
+static ConvOptions parse_conv_options(ErlNifEnv *env, ERL_NIF_TERM opts_term) {
+  ConvOptions opts;
 
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
-      },
-      tensor->data);
+  // Helper to get a key from keyword list
+  auto get_keyword = [env, opts_term](const char *key) -> ERL_NIF_TERM {
+    ERL_NIF_TERM value;
+    ERL_NIF_TERM atom = enif_make_atom(env, key);
+    if (enif_get_map_value(env, opts_term, atom, &value)) {
+      return value;
+    }
+    // Try as list (keyword list)
+    ERL_NIF_TERM list = opts_term;
+    ERL_NIF_TERM head, tail;
+    while (enif_get_list_cell(env, list, &head, &tail)) {
+      const ERL_NIF_TERM *tuple;
+      int arity;
+      if (enif_get_tuple(env, head, &arity, &tuple) && arity == 2) {
+        char atom_buf[256];
+        if (enif_get_atom(env, tuple[0], atom_buf, sizeof(atom_buf),
+                          ERL_NIF_LATIN1)) {
+          if (strcmp(atom_buf, key) == 0) {
+            return tuple[1];
+          }
+        }
+      }
+      list = tail;
+    }
+    return 0;
+  };
 
-  return result;
+  // Helper to parse list of integers
+  auto parse_int_list = [env](ERL_NIF_TERM term) -> std::vector<int64_t> {
+    std::vector<int64_t> result;
+    ERL_NIF_TERM list = term;
+    ERL_NIF_TERM head, tail;
+    while (enif_get_list_cell(env, list, &head, &tail)) {
+      long val;
+      if (enif_get_long(env, head, &val)) {
+        result.push_back(static_cast<int64_t>(val));
+      }
+      list = tail;
+    }
+    return result;
+  };
+
+  // Helper to parse list of tuples (for padding)
+  auto parse_padding_list =
+      [env](ERL_NIF_TERM term) -> std::vector<std::pair<int64_t, int64_t>> {
+    std::vector<std::pair<int64_t, int64_t>> result;
+    ERL_NIF_TERM list = term;
+    ERL_NIF_TERM head, tail;
+    while (enif_get_list_cell(env, list, &head, &tail)) {
+      const ERL_NIF_TERM *tuple;
+      int arity;
+      if (enif_get_tuple(env, head, &arity, &tuple) && arity == 2) {
+        long left, right;
+        if (enif_get_long(env, tuple[0], &left) &&
+            enif_get_long(env, tuple[1], &right)) {
+          result.push_back(
+              {static_cast<int64_t>(left), static_cast<int64_t>(right)});
+        }
+      }
+      list = tail;
+    }
+    return result;
+  };
+
+  // Parse each option
+  ERL_NIF_TERM term;
+
+  if ((term = get_keyword("strides"))) {
+    opts.strides = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("padding"))) {
+    opts.padding = parse_padding_list(term);
+  }
+
+  if ((term = get_keyword("input_dilation"))) {
+    opts.input_dilation = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("kernel_dilation"))) {
+    opts.kernel_dilation = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("feature_group_size"))) {
+    long val;
+    if (enif_get_long(env, term, &val)) {
+      opts.feature_group_size = static_cast<int64_t>(val);
+    }
+  }
+
+  if ((term = get_keyword("batch_group_size"))) {
+    long val;
+    if (enif_get_long(env, term, &val)) {
+      opts.batch_group_size = static_cast<int64_t>(val);
+    }
+  }
+
+  if ((term = get_keyword("input_permutation"))) {
+    opts.input_permutation = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("kernel_permutation"))) {
+    opts.kernel_permutation = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("output_permutation"))) {
+    opts.output_permutation = parse_int_list(term);
+  }
+
+  return opts;
 }
-FINE_NIF(conv_nif, 0);
+
+// Convolution implementation
+static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
+                             const ERL_NIF_TERM argv[]) {
+  if (argc != 3) {
+    return enif_make_badarg(env);
+  }
+
+  try {
+    // Decode tensor resources using Fine's decoder
+    auto tensor = fine::decode<fine::ResourcePtr<EigenTensor>>(env, argv[0]);
+    auto kernel = fine::decode<fine::ResourcePtr<EigenTensor>>(env, argv[1]);
+
+    // Parse options
+    ConvOptions opts = parse_conv_options(env, argv[2]);
+
+    auto result = fine::make_resource<EigenTensor>();
+
+    int rank = tensor->shape.size();
+    int kernel_rank = kernel->shape.size();
+
+    // Validate inputs
+    if (rank < 3 || kernel_rank < 3) {
+      throw std::runtime_error("conv requires at least 3D tensors");
+    }
+
+    // Extract dimensions
+    // Input: [batch, in_channels, spatial_dims...]
+    // Kernel: [out_channels, in_channels/feature_groups, spatial_dims...]
+    int64_t batch_size = tensor->shape[0];
+    int64_t in_channels = tensor->shape[1];
+    int64_t out_channels = kernel->shape[0];
+
+    int spatial_dims = rank - 2;
+
+    // Calculate output spatial dimensions
+    std::vector<int64_t> out_shape = {batch_size, out_channels};
+
+    for (int i = 0; i < spatial_dims; ++i) {
+      int64_t in_size = tensor->shape[i + 2];
+      int64_t kernel_size = kernel->shape[i + 2];
+      int64_t stride = opts.strides.empty() ? 1 : opts.strides[i];
+      int64_t input_dil =
+          opts.input_dilation.empty() ? 1 : opts.input_dilation[i];
+      int64_t kernel_dil =
+          opts.kernel_dilation.empty() ? 1 : opts.kernel_dilation[i];
+      int64_t pad_left = opts.padding.empty() ? 0 : opts.padding[i].first;
+      int64_t pad_right = opts.padding.empty() ? 0 : opts.padding[i].second;
+
+      // Effective input/kernel sizes with dilation
+      int64_t dilated_in_size = (in_size - 1) * input_dil + 1;
+      int64_t dilated_kernel_size = (kernel_size - 1) * kernel_dil + 1;
+
+      // Output size formula
+      int64_t out_size =
+          (dilated_in_size + pad_left + pad_right - dilated_kernel_size) /
+              stride +
+          1;
+      out_shape.push_back(out_size);
+    }
+
+    result->shape = out_shape;
+
+    // Perform convolution - output is always floating point
+    std::visit(
+        [&](auto &tensor_arr) {
+          using InputScalar =
+              typename std::decay_t<decltype(tensor_arr)>::Scalar;
+          auto &kernel_arr = std::get<FlatArray<InputScalar>>(kernel->data);
+
+          // Determine output type (floating point version of input)
+          using OutputScalar = typename std::conditional<
+              std::is_same_v<InputScalar, std::complex<float>> ||
+                  std::is_same_v<InputScalar, std::complex<double>>,
+              InputScalar, // Complex types stay complex
+              typename std::conditional<(sizeof(InputScalar) > 4 ||
+                                         std::is_same_v<InputScalar, double>),
+                                        double, // Use double for large or
+                                                // double inputs
+                                        float   // Use float for everything else
+                                        >::type>::type;
+
+          auto &out_arr = result->data.emplace<FlatArray<OutputScalar>>();
+
+          size_t out_size = 1;
+          for (auto dim : out_shape)
+            out_size *= dim;
+          out_arr.resize(out_size);
+          out_arr.setZero();
+
+          // Compute strides for input, kernel, and output
+          std::vector<int64_t> in_strides(rank);
+          in_strides[rank - 1] = 1;
+          for (int i = rank - 2; i >= 0; --i) {
+            in_strides[i] = in_strides[i + 1] * tensor->shape[i + 1];
+          }
+
+          std::vector<int64_t> kernel_strides(kernel_rank);
+          kernel_strides[kernel_rank - 1] = 1;
+          for (int i = kernel_rank - 2; i >= 0; --i) {
+            kernel_strides[i] = kernel_strides[i + 1] * kernel->shape[i + 1];
+          }
+
+          std::vector<int64_t> out_strides(rank);
+          out_strides[rank - 1] = 1;
+          for (int i = rank - 2; i >= 0; --i) {
+            out_strides[i] = out_strides[i + 1] * out_shape[i + 1];
+          }
+
+          // Simplified convolution (without groups for now)
+          int64_t kernel_channels = kernel->shape[1];
+
+          // For each output position
+          for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t oc = 0; oc < out_channels; ++oc) {
+              // Get output spatial coordinates
+              std::function<void(int, std::vector<int64_t> &)> iterate_spatial;
+              iterate_spatial = [&](int dim, std::vector<int64_t> &out_coords) {
+                if (dim == spatial_dims) {
+                  // Compute convolution at this output position
+                  size_t out_idx = b * out_strides[0] + oc * out_strides[1];
+                  for (int i = 0; i < spatial_dims; ++i) {
+                    out_idx += out_coords[i] * out_strides[i + 2];
+                  }
+
+                  // Sum over kernel
+                  for (int64_t ic = 0; ic < kernel_channels; ++ic) {
+                    std::function<void(int, std::vector<int64_t> &)>
+                        iterate_kernel;
+                    iterate_kernel = [&](int kdim,
+                                         std::vector<int64_t> &kcoords) {
+                      if (kdim == spatial_dims) {
+                        // Compute input position
+                        std::vector<int64_t> in_coords(spatial_dims);
+                        bool valid = true;
+                        for (int i = 0; i < spatial_dims; ++i) {
+                          int64_t stride =
+                              opts.strides.empty() ? 1 : opts.strides[i];
+                          int64_t input_dil = opts.input_dilation.empty()
+                                                  ? 1
+                                                  : opts.input_dilation[i];
+                          int64_t kernel_dil = opts.kernel_dilation.empty()
+                                                   ? 1
+                                                   : opts.kernel_dilation[i];
+                          int64_t pad_left =
+                              opts.padding.empty() ? 0 : opts.padding[i].first;
+
+                          int64_t in_pos = out_coords[i] * stride +
+                                           kcoords[i] * kernel_dil - pad_left;
+
+                          // Apply input dilation
+                          if (input_dil > 1) {
+                            if (in_pos % input_dil != 0) {
+                              valid = false;
+                              break;
+                            }
+                            in_pos /= input_dil;
+                          }
+
+                          if (in_pos < 0 || in_pos >= tensor->shape[i + 2]) {
+                            valid = false;
+                            break;
+                          }
+                          in_coords[i] = in_pos;
+                        }
+
+                        if (valid) {
+                          // Compute indices
+                          size_t in_idx =
+                              b * in_strides[0] + ic * in_strides[1];
+                          for (int i = 0; i < spatial_dims; ++i) {
+                            in_idx += in_coords[i] * in_strides[i + 2];
+                          }
+
+                          size_t kernel_idx =
+                              oc * kernel_strides[0] + ic * kernel_strides[1];
+                          for (int i = 0; i < spatial_dims; ++i) {
+                            kernel_idx += kcoords[i] * kernel_strides[i + 2];
+                          }
+
+                          out_arr[out_idx] +=
+                              static_cast<OutputScalar>(tensor_arr[in_idx]) *
+                              static_cast<OutputScalar>(kernel_arr[kernel_idx]);
+                        }
+                        return;
+                      }
+
+                      for (int64_t k = 0; k < kernel->shape[kdim + 2]; ++k) {
+                        kcoords[kdim] = k;
+                        iterate_kernel(kdim + 1, kcoords);
+                      }
+                    };
+
+                    std::vector<int64_t> kcoords(spatial_dims);
+                    iterate_kernel(0, kcoords);
+                  }
+                  return;
+                }
+
+                for (int64_t i = 0; i < out_shape[dim + 2]; ++i) {
+                  out_coords[dim] = i;
+                  iterate_spatial(dim + 1, out_coords);
+                }
+              };
+
+              std::vector<int64_t> out_coords(spatial_dims);
+              iterate_spatial(0, out_coords);
+            }
+          }
+        },
+        tensor->data);
+
+    return fine::Encoder<fine::ResourcePtr<EigenTensor>>::encode(env, result);
+  } catch (const std::exception &e) {
+    return enif_raise_exception(
+        env, enif_make_string(
+                 env, (std::string("conv_nif error: ") + e.what()).c_str(),
+                 ERL_NIF_LATIN1));
+  }
+}
+
+// Register the manual NIF
+static auto __nif_registration_conv =
+    fine::Registration::register_nif({"conv_nif", 3, conv_nif, 0});
 
 // Constant/Eye/Iota
 // Helper to decode constant value (either number or {real, imag} tuple for
@@ -2394,17 +2722,17 @@ fine::ResourcePtr<EigenTensor> eye_nif(ErlNifEnv *env, ScalarType type,
 
   auto tensor = fine::make_resource<EigenTensor>();
   tensor->shape = shape;
-  
+
   // Last 2 dimensions define the identity matrix
   int rows = shape[shape.size() - 2];
   int cols = shape[shape.size() - 1];
-  
+
   // Calculate batch size from all preceding dimensions
   size_t batch_size = 1;
   for (size_t i = 0; i < shape.size() - 2; ++i) {
     batch_size *= shape[i];
   }
-  
+
   size_t matrix_elements = rows * cols;
   size_t total_elements = batch_size * matrix_elements;
 
@@ -2412,15 +2740,15 @@ fine::ResourcePtr<EigenTensor> eye_nif(ErlNifEnv *env, ScalarType type,
     using Scalar = std::decay_t<decltype(*scalar_ptr)>;
     auto &arr = tensor->data.emplace<FlatArray<Scalar>>();
     arr.resize(total_elements);
-    
+
     // Create identity matrix template
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> mat(
         rows, cols);
     mat.setIdentity();
-    
+
     // Copy identity matrix to each batch
     for (size_t batch = 0; batch < batch_size; ++batch) {
-      std::memcpy(arr.data() + batch * matrix_elements, mat.data(), 
+      std::memcpy(arr.data() + batch * matrix_elements, mat.data(),
                   matrix_elements * sizeof(Scalar));
     }
   };

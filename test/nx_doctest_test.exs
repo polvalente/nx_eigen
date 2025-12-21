@@ -70,8 +70,6 @@ defmodule NxEigen.DocTest do
       ifft: 2,
       fft2: 2,
       ifft2: 2,
-      # Convolution
-      conv: 3
     ]
 
   doctest Nx.LinAlg,
