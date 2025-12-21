@@ -34,11 +34,6 @@ defmodule NxEigen.DocTest do
   doctest Nx,
     except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ [
       :moduledoc,
-      # Slicing with tensor indices
-      # Diagonal operations (require multi-dimensional gather support)
-      take_diagonal: 2,
-      make_diagonal: 2,
-      put_diagonal: 3,
       # Binary output operations
       to_binary: 2,
       to_flat_list: 2,
