@@ -23,3 +23,5 @@ nx_eigen-*.tar
 /tmp/
 
 /eigen-*
+/fftw-*
+/priv/libnx_eigen.so
