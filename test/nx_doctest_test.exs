@@ -57,9 +57,7 @@ defmodule NxEigen.DocTest do
       # Dot product with complex batching
       dot: 2,
       # Clip
-      clip: 3,
-      # Put operations
-      put_slice: 3
+      clip: 3
     ]
 
   doctest Nx.LinAlg,

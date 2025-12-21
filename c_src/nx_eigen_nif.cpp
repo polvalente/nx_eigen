@@ -3847,77 +3847,81 @@ fine::ResourcePtr<EigenTensor>
 put_slice_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
               fine::ResourcePtr<EigenTensor> slice,
               std::vector<int64_t> start_indices) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = tensor->shape;
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = tensor->shape;
 
-  // Calculate strides
-  int rank = tensor->shape.size();
-  std::vector<size_t> tensor_strides(rank);
-  size_t stride = 1;
-  for (int i = rank - 1; i >= 0; --i) {
-    tensor_strides[i] = stride;
-    stride *= tensor->shape[i];
-  }
-  size_t total_size = stride;
+    // Calculate strides
+    int rank = tensor->shape.size();
+    std::vector<size_t> tensor_strides(rank);
+    size_t stride = 1;
+    for (int i = rank - 1; i >= 0; --i) {
+      tensor_strides[i] = stride;
+      stride *= tensor->shape[i];
+    }
+    size_t total_size = stride;
 
-  std::vector<size_t> slice_strides(rank);
-  stride = 1;
-  for (int i = rank - 1; i >= 0; --i) {
-    slice_strides[i] = stride;
-    stride *= slice->shape[i];
-  }
-  size_t slice_size = stride;
+    std::vector<size_t> slice_strides(rank);
+    stride = 1;
+    for (int i = rank - 1; i >= 0; --i) {
+      slice_strides[i] = stride;
+      stride *= slice->shape[i];
+    }
+    size_t slice_size = stride;
 
-  std::visit(
-      [&](auto &tensor_arr) {
-        using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
-        auto &out_arr = result->data.emplace<FlatArray<T>>();
-        out_arr.resize(total_size);
+    std::visit(
+        [&](auto &tensor_arr) {
+          using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
+          auto &out_arr = result->data.emplace<FlatArray<T>>();
+          out_arr.resize(total_size);
 
-        // Copy original tensor
-        out_arr = tensor_arr;
+          // Copy original tensor
+          out_arr = tensor_arr;
 
-        // Get slice data (must be same type)
-        auto &slice_arr = std::get<FlatArray<T>>(slice->data);
+          // Get slice data (must be same type)
+          auto &slice_arr = std::get<FlatArray<T>>(slice->data);
 
-        // Overwrite the slice region
-        for (size_t slice_idx = 0; slice_idx < slice_size; ++slice_idx) {
-          // Convert slice linear index to coordinates
-          size_t temp = slice_idx;
-          size_t tensor_idx = 0;
+          // Overwrite the slice region
+          for (size_t slice_idx = 0; slice_idx < slice_size; ++slice_idx) {
+            // Convert slice linear index to coordinates
+            size_t temp = slice_idx;
+            size_t tensor_idx = 0;
 
-          for (int d = rank - 1; d >= 0; --d) {
-            int64_t slice_coord = temp % slice->shape[d];
-            temp /= slice->shape[d];
+            for (int d = rank - 1; d >= 0; --d) {
+              int64_t slice_coord = temp % slice->shape[d];
+              temp /= slice->shape[d];
 
-            // Map to tensor coordinate
-            int64_t tensor_coord = start_indices[d] + slice_coord;
+              // Map to tensor coordinate
+              int64_t tensor_coord = start_indices[d] + slice_coord;
 
-            // Bounds check
-            if (tensor_coord < 0 || tensor_coord >= tensor->shape[d]) {
-              throw std::runtime_error(
-                  "put_slice_nif: tensor coordinate " +
-                  std::to_string(tensor_coord) +
-                  " out of bounds at dimension " + std::to_string(d) +
-                  " (size: " + std::to_string(tensor->shape[d]) + ")");
+              // Bounds check
+              if (tensor_coord < 0 || tensor_coord >= tensor->shape[d]) {
+                throw std::runtime_error(
+                    "put_slice_nif: tensor coordinate " +
+                    std::to_string(tensor_coord) +
+                    " out of bounds at dimension " + std::to_string(d) +
+                    " (size: " + std::to_string(tensor->shape[d]) + ")");
+              }
+
+              tensor_idx += tensor_coord * tensor_strides[d];
             }
 
-            tensor_idx += tensor_coord * tensor_strides[d];
+            // Bounds check on computed index
+            if (tensor_idx >= total_size) {
+              throw std::runtime_error(
+                  "put_slice_nif: computed index " + std::to_string(tensor_idx) +
+                  " out of bounds (size: " + std::to_string(total_size) + ")");
+            }
+
+            out_arr[tensor_idx] = slice_arr[slice_idx];
           }
+        },
+        tensor->data);
 
-          // Bounds check on computed index
-          if (tensor_idx >= total_size) {
-            throw std::runtime_error(
-                "put_slice_nif: computed index " + std::to_string(tensor_idx) +
-                " out of bounds (size: " + std::to_string(total_size) + ")");
-          }
-
-          out_arr[tensor_idx] = slice_arr[slice_idx];
-        }
-      },
-      tensor->data);
-
-  return result;
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("put_slice_nif error: ") + e.what());
+  }
 }
 FINE_NIF(put_slice_nif, 0);
 

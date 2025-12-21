@@ -142,6 +142,9 @@ defmodule NxEigen.Backend do
 
   @impl true
   def put_slice(out, tensor, start_indices, slice) do
+    # Upcast inputs to output type to handle mixed types (e.g., s32 tensor + f32 slice)
+    tensor = maybe_upcast(tensor, out.type)
+    slice = maybe_upcast(slice, out.type)
     # Convert tensor indices to integers and clamp them
     start_indices = clamp_indices(start_indices, tensor.shape, Tuple.to_list(slice.shape))
     state = NxEigen.NIF.put_slice(tensor.data.state, slice.data.state, start_indices)
