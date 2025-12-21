@@ -38,9 +38,6 @@ defmodule NxEigen.DocTest do
       mode: 2,  # Has slice stride edge cases
       variance: 2,  # Broadcast issue with mean result
       standard_deviation: 2,  # Depends on variance
-      # Argmax/argmin with tie_break
-      argmax: 2,
-      argmin: 2,
       # Cumulative operations (not implemented)
       cumulative_sum: 2,
       cumulative_product: 2,

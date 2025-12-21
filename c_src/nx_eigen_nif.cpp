@@ -3078,8 +3078,19 @@ struct ArgMaxOp {
     return std::numeric_limits<T>::lowest();
   }
   template <typename T>
-  static bool should_update(const T &val, const T &current) {
-    return val > current;
+  static bool should_update(const T &val, const T &current, bool tie_break_high) {
+    // NaN always wins (NaN propagates)
+    if (std::isnan(val) && !std::isnan(current)) return true;
+    // Don't replace NaN with non-NaN
+    if (std::isnan(current)) return false;
+    // If val is also NaN, normal comparison (which will be false, so no update unless tie_break_high with NaN==NaN)
+    if (std::isnan(val)) return false;
+    
+    if (tie_break_high) {
+      return val >= current;  // >= to prefer higher index on ties
+    } else {
+      return val > current;   // > to prefer lower index on ties
+    }
   }
 };
 
@@ -3088,8 +3099,19 @@ struct ArgMinOp {
     return std::numeric_limits<T>::max();
   }
   template <typename T>
-  static bool should_update(const T &val, const T &current) {
-    return val < current;
+  static bool should_update(const T &val, const T &current, bool tie_break_high) {
+    // NaN always wins (NaN propagates)
+    if (std::isnan(val) && !std::isnan(current)) return true;
+    // Don't replace NaN with non-NaN
+    if (std::isnan(current)) return false;
+    // If val is also NaN, normal comparison (which will be false, so no update unless tie_break_high with NaN==NaN)
+    if (std::isnan(val)) return false;
+    
+    if (tie_break_high) {
+      return val <= current;  // <= to prefer higher index on ties
+    } else {
+      return val < current;   // < to prefer lower index on ties
+    }
   }
 };
 
@@ -3097,7 +3119,7 @@ struct ArgMinOp {
 template <typename ArgOp>
 fine::ResourcePtr<EigenTensor>
 arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-                int64_t axis) { // -1 for flat
+                int64_t axis, int64_t tie_break) { // -1 for flat, tie_break: 0=low, 1=high
   auto result = fine::make_resource<EigenTensor>();
 
   // Output shape
@@ -3141,6 +3163,8 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
   // Nx default is S64.
   auto &out_arr = result->data.emplace<FlatArray<int64_t>>();
   out_arr.resize(total_out);
+  // Initialize all indices to 0
+  std::fill(out_arr.begin(), out_arr.end(), 0);
 
   // We also need a "values" array to track current max value for comparison
   // We can't store it in result->data because result is int64.
@@ -3204,7 +3228,8 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 
             // Compare and update
             T val = in_arr[i];
-            if (ArgOp::should_update(val, val_buffer[out_idx])) {
+            bool tie_break_high = (tie_break == 1);
+            if (ArgOp::should_update(val, val_buffer[out_idx], tie_break_high)) {
               val_buffer[out_idx] = val;
               out_arr[out_idx] = current_axis_idx;
             }
@@ -3219,15 +3244,17 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 // Separate argmax and argmin NIFs
 fine::ResourcePtr<EigenTensor> argmax_nif(ErlNifEnv *env,
                                           fine::ResourcePtr<EigenTensor> tensor,
-                                          int64_t axis) {
-  return arg_reduce_impl<ArgMaxOp>(env, tensor, axis);
+                                          int64_t axis,
+                                          int64_t tie_break) {
+  return arg_reduce_impl<ArgMaxOp>(env, tensor, axis, tie_break);
 }
 FINE_NIF(argmax_nif, 0);
 
 fine::ResourcePtr<EigenTensor> argmin_nif(ErlNifEnv *env,
                                           fine::ResourcePtr<EigenTensor> tensor,
-                                          int64_t axis) {
-  return arg_reduce_impl<ArgMinOp>(env, tensor, axis);
+                                          int64_t axis,
+                                          int64_t tie_break) {
+  return arg_reduce_impl<ArgMinOp>(env, tensor, axis, tie_break);
 }
 FINE_NIF(argmin_nif, 0);
 

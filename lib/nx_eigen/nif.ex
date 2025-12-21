@@ -62,11 +62,11 @@ defmodule NxEigen.NIF do
   defp any_nif(_tensor, _axes), do: :erlang.nif_error(:nif_not_loaded)
 
   # Arg reductions
-  def argmax(tensor, axis), do: argmax_nif(tensor, axis)
-  defp argmax_nif(_tensor, _axis), do: :erlang.nif_error(:nif_not_loaded)
+  def argmax(tensor, axis, tie_break), do: argmax_nif(tensor, axis, tie_break)
+  defp argmax_nif(_tensor, _axis, _tie_break), do: :erlang.nif_error(:nif_not_loaded)
 
-  def argmin(tensor, axis), do: argmin_nif(tensor, axis)
-  defp argmin_nif(_tensor, _axis), do: :erlang.nif_error(:nif_not_loaded)
+  def argmin(tensor, axis, tie_break), do: argmin_nif(tensor, axis, tie_break)
+  defp argmin_nif(_tensor, _axis, _tie_break), do: :erlang.nif_error(:nif_not_loaded)
 
   # Slicing & Indexing
   def slice(tensor, starts, lengths, strides), do: slice_nif(tensor, starts, lengths, strides)

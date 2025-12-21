@@ -118,8 +118,16 @@ defmodule NxEigen.Backend do
     def unquote(op)(out, tensor, opts) do
       axis = opts[:axis]
       axis_val = if axis, do: axis, else: -1
-      state = apply(NxEigen.NIF, unquote(op), [tensor.data.state, axis_val])
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      tie_break = opts[:tie_break] || :low
+      tie_break_val = if tie_break == :high, do: 1, else: 0
+      state = apply(NxEigen.NIF, unquote(op), [tensor.data.state, axis_val, tie_break_val])
+      # NIF returns int64, but we need to convert to the requested output type
+      result = %{out | data: %__MODULE__{state: state, id: make_ref()}, type: {:s, 64}}
+      if out.type != {:s, 64} do
+        as_type(out, result)
+      else
+        result
+      end
     end
   end
 
