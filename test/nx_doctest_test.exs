@@ -27,6 +27,10 @@ defmodule NxEigen.DocTest do
       tanh: 1
   ]
 
+  @unsupported_ops [
+    reduce: 4
+  ]
+
   @sub_byte_types [
       # Sub-byte types (u2, etc.) not supported
       bit_size: 1
@@ -35,7 +39,7 @@ defmodule NxEigen.DocTest do
   # Run Nx's own doctests with NxEigen backend
   # This ensures full compatibility with Nx's documented behavior
   doctest Nx,
-    except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ [
+    except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ @unsupported_ops ++ [
       :moduledoc,
       # Statistical functions
       mode: 2,  # Has slice stride edge cases
@@ -55,12 +59,7 @@ defmodule NxEigen.DocTest do
       # Clip
       clip: 3,
       # Put operations
-      put_slice: 3,
-      # Indexed operations
-      indexed_add: 4,
-      indexed_put: 4,
-      # Custom reduce
-      reduce: 4
+      put_slice: 3
     ]
 
   doctest Nx.LinAlg,

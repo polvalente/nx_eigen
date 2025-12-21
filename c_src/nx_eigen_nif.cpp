@@ -302,8 +302,8 @@ template <typename T> auto safe_atan2(const T &y, const T &x) {
   if constexpr (Eigen::NumTraits<Scalar>::IsComplex) {
     throw std::runtime_error("atan2 not supported for complex types");
   } else {
-    return y.binaryExpr(x, [](Scalar a, Scalar b) { 
-      return static_cast<Scalar>(std::atan2(a, b)); 
+    return y.binaryExpr(x, [](Scalar a, Scalar b) {
+      return static_cast<Scalar>(std::atan2(a, b));
     });
   }
 }
@@ -1780,81 +1780,117 @@ indexed_add_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
         },
         indices->data);
 
-    // If axes is empty, assume flat indexing
+    // Infer axes from indices if not provided
+    // indices shape is [..., num_axes] where last dim has coordinates
+    int indices_rank = indices->shape.size();
+    int num_axes = indices->shape[indices_rank - 1];
     if (axes.empty()) {
-      // Flat indexing - indices are linear positions
-      std::visit(
-          [&](auto &src_mat) {
-            using T = typename std::decay_t<decltype(src_mat)>;
-            auto &dst_mat = result->data.emplace<T>();
-            dst_mat = src_mat;
-
-            auto &upd_mat = std::get<T>(updates->data);
-
-            for (size_t i = 0; i < idx_vec.size(); ++i) {
-              int64_t idx = idx_vec[i];
-              if (idx >= 0 && idx < static_cast<int64_t>(dst_mat.size())) {
-                dst_mat[idx] += upd_mat[i];
-              }
-            }
-          },
-          tensor->data);
-    } else {
-      // Multi-dimensional indexing
-      // indices shape is [..., num_axes] where last dim has coordinates
-      int indices_rank = indices->shape.size();
-      int num_axes = indices->shape[indices_rank - 1];
-      size_t num_updates = idx_vec.size() / num_axes;
-
-      // Calculate tensor strides
-      int tensor_rank = tensor->shape.size();
-      std::vector<size_t> tensor_strides(tensor_rank);
-      size_t stride = 1;
-      for (int i = tensor_rank - 1; i >= 0; --i) {
-        tensor_strides[i] = stride;
-        stride *= tensor->shape[i];
+      axes.resize(num_axes);
+      for (int i = 0; i < num_axes; ++i) {
+        axes[i] = i;
       }
+    }
 
-      std::visit(
-          [&](auto &src_mat) {
-            using T = typename std::decay_t<decltype(src_mat)>;
-            auto &dst_mat = result->data.emplace<T>();
-            dst_mat = src_mat;
+    size_t num_updates = idx_vec.size() / num_axes;
+    int tensor_rank = tensor->shape.size();
 
-            auto &upd_mat = std::get<T>(updates->data);
+    // Calculate tensor strides
+    std::vector<size_t> tensor_strides(tensor_rank);
+    size_t stride = 1;
+    for (int i = tensor_rank - 1; i >= 0; --i) {
+      tensor_strides[i] = stride;
+      stride *= tensor->shape[i];
+    }
 
-            // For each update position
-            for (size_t i = 0; i < num_updates; ++i) {
-              // Get coordinates from indices
-              size_t linear_idx = 0;
-              for (int ax = 0; ax < num_axes; ++ax) {
-                int64_t coord = idx_vec[i * num_axes + ax];
-                int tensor_ax = axes[ax];
+    // Calculate update slice shape (non-indexed dimensions)
+    std::vector<int64_t> update_slice_shape;
+    for (int i = 0; i < tensor_rank; ++i) {
+      bool is_indexed = false;
+      for (int ax : axes) {
+        if (ax == i) {
+          is_indexed = true;
+          break;
+        }
+      }
+      if (!is_indexed) {
+        update_slice_shape.push_back(tensor->shape[i]);
+      }
+    }
 
-                // Bounds check
-                if (coord < 0 || coord >= tensor->shape[tensor_ax]) {
-                  throw std::runtime_error(
-                      "indexed_add: index " + std::to_string(coord) +
-                      " out of bounds for axis " + std::to_string(tensor_ax) +
-                      " with size " + std::to_string(tensor->shape[tensor_ax]));
-                }
+    // Calculate update strides
+    size_t update_slice_size = 1;
+    for (auto dim : update_slice_shape) {
+      update_slice_size *= dim;
+    }
 
-                linear_idx += coord * tensor_strides[tensor_ax];
-              }
+    std::visit(
+        [&](auto &src_mat) {
+          using T = typename std::decay_t<decltype(src_mat)>;
+          auto &dst_mat = result->data.emplace<T>();
+          dst_mat = src_mat;
+
+          auto &upd_mat = std::get<T>(updates->data);
+
+          // For each update position
+          for (size_t i = 0; i < num_updates; ++i) {
+            // Get base coordinates from indices
+            std::vector<int64_t> base_coords(tensor_rank, 0);
+            for (int ax = 0; ax < num_axes; ++ax) {
+              int64_t coord = idx_vec[i * num_axes + ax];
+              int tensor_ax = axes[ax];
 
               // Bounds check
-              if (linear_idx >= dst_mat.size()) {
-                throw std::runtime_error("indexed_add: computed index " +
-                                         std::to_string(linear_idx) +
-                                         " out of bounds (size: " +
-                                         std::to_string(dst_mat.size()) + ")");
+              if (coord < 0 || coord >= tensor->shape[tensor_ax]) {
+                throw std::runtime_error(
+                    "indexed_add: index " + std::to_string(coord) +
+                    " out of bounds for axis " + std::to_string(tensor_ax) +
+                    " with size " + std::to_string(tensor->shape[tensor_ax]));
               }
 
-              dst_mat[linear_idx] += upd_mat[i];
+              base_coords[tensor_ax] = coord;
             }
-          },
-          tensor->data);
-    }
+
+            // Iterate over the update slice
+            for (size_t slice_idx = 0; slice_idx < update_slice_size;
+                 ++slice_idx) {
+              // Convert slice index to coordinates in non-indexed dimensions
+              std::vector<int64_t> coords = base_coords;
+              size_t temp = slice_idx;
+              int slice_dim = update_slice_shape.size() - 1;
+              for (int dim = tensor_rank - 1; dim >= 0; --dim) {
+                bool is_indexed = false;
+                for (int ax : axes) {
+                  if (ax == dim) {
+                    is_indexed = true;
+                    break;
+                  }
+                }
+                if (!is_indexed) {
+                  coords[dim] = temp % update_slice_shape[slice_dim];
+                  temp /= update_slice_shape[slice_dim];
+                  slice_dim--;
+                }
+              }
+
+              // Calculate linear indices
+              size_t tensor_linear_idx = 0;
+              for (int dim = 0; dim < tensor_rank; ++dim) {
+                tensor_linear_idx += coords[dim] * tensor_strides[dim];
+              }
+
+              size_t update_linear_idx = i * update_slice_size + slice_idx;
+
+              // Bounds check
+              if (tensor_linear_idx >= dst_mat.size() ||
+                  update_linear_idx >= upd_mat.size()) {
+                throw std::runtime_error("indexed_add: index out of bounds");
+              }
+
+              dst_mat[tensor_linear_idx] += upd_mat[update_linear_idx];
+            }
+          }
+        },
+        tensor->data);
 
     return result;
   } catch (const std::exception &e) {
@@ -1890,81 +1926,117 @@ indexed_put_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
         },
         indices->data);
 
-    // If axes is empty, assume flat indexing
+    // Infer axes from indices if not provided
+    // indices shape is [..., num_axes] where last dim has coordinates
+    int indices_rank = indices->shape.size();
+    int num_axes = indices->shape[indices_rank - 1];
     if (axes.empty()) {
-      // Flat indexing - indices are linear positions
-      std::visit(
-          [&](auto &src_mat) {
-            using T = typename std::decay_t<decltype(src_mat)>;
-            auto &dst_mat = result->data.emplace<T>();
-            dst_mat = src_mat;
-
-            auto &upd_mat = std::get<T>(updates->data);
-
-            for (size_t i = 0; i < idx_vec.size(); ++i) {
-              int64_t idx = idx_vec[i];
-              if (idx >= 0 && idx < static_cast<int64_t>(dst_mat.size())) {
-                dst_mat[idx] = upd_mat[i];
-              }
-            }
-          },
-          tensor->data);
-    } else {
-      // Multi-dimensional indexing
-      // indices shape is [..., num_axes] where last dim has coordinates
-      int indices_rank = indices->shape.size();
-      int num_axes = indices->shape[indices_rank - 1];
-      size_t num_updates = idx_vec.size() / num_axes;
-
-      // Calculate tensor strides
-      int tensor_rank = tensor->shape.size();
-      std::vector<size_t> tensor_strides(tensor_rank);
-      size_t stride = 1;
-      for (int i = tensor_rank - 1; i >= 0; --i) {
-        tensor_strides[i] = stride;
-        stride *= tensor->shape[i];
+      axes.resize(num_axes);
+      for (int i = 0; i < num_axes; ++i) {
+        axes[i] = i;
       }
+    }
 
-      std::visit(
-          [&](auto &src_mat) {
-            using T = typename std::decay_t<decltype(src_mat)>;
-            auto &dst_mat = result->data.emplace<T>();
-            dst_mat = src_mat;
+    size_t num_updates = idx_vec.size() / num_axes;
+    int tensor_rank = tensor->shape.size();
 
-            auto &upd_mat = std::get<T>(updates->data);
+    // Calculate tensor strides
+    std::vector<size_t> tensor_strides(tensor_rank);
+    size_t stride = 1;
+    for (int i = tensor_rank - 1; i >= 0; --i) {
+      tensor_strides[i] = stride;
+      stride *= tensor->shape[i];
+    }
 
-            // For each update position
-            for (size_t i = 0; i < num_updates; ++i) {
-              // Get coordinates from indices
-              size_t linear_idx = 0;
-              for (int ax = 0; ax < num_axes; ++ax) {
-                int64_t coord = idx_vec[i * num_axes + ax];
-                int tensor_ax = axes[ax];
+    // Calculate update slice shape (non-indexed dimensions)
+    std::vector<int64_t> update_slice_shape;
+    for (int i = 0; i < tensor_rank; ++i) {
+      bool is_indexed = false;
+      for (int ax : axes) {
+        if (ax == i) {
+          is_indexed = true;
+          break;
+        }
+      }
+      if (!is_indexed) {
+        update_slice_shape.push_back(tensor->shape[i]);
+      }
+    }
 
-                // Bounds check
-                if (coord < 0 || coord >= tensor->shape[tensor_ax]) {
-                  throw std::runtime_error(
-                      "indexed_put: index " + std::to_string(coord) +
-                      " out of bounds for axis " + std::to_string(tensor_ax) +
-                      " with size " + std::to_string(tensor->shape[tensor_ax]));
-                }
+    // Calculate update strides
+    size_t update_slice_size = 1;
+    for (auto dim : update_slice_shape) {
+      update_slice_size *= dim;
+    }
 
-                linear_idx += coord * tensor_strides[tensor_ax];
-              }
+    std::visit(
+        [&](auto &src_mat) {
+          using T = typename std::decay_t<decltype(src_mat)>;
+          auto &dst_mat = result->data.emplace<T>();
+          dst_mat = src_mat;
+
+          auto &upd_mat = std::get<T>(updates->data);
+
+          // For each update position
+          for (size_t i = 0; i < num_updates; ++i) {
+            // Get base coordinates from indices
+            std::vector<int64_t> base_coords(tensor_rank, 0);
+            for (int ax = 0; ax < num_axes; ++ax) {
+              int64_t coord = idx_vec[i * num_axes + ax];
+              int tensor_ax = axes[ax];
 
               // Bounds check
-              if (linear_idx >= dst_mat.size()) {
-                throw std::runtime_error("indexed_put: computed index " +
-                                         std::to_string(linear_idx) +
-                                         " out of bounds (size: " +
-                                         std::to_string(dst_mat.size()) + ")");
+              if (coord < 0 || coord >= tensor->shape[tensor_ax]) {
+                throw std::runtime_error(
+                    "indexed_put: index " + std::to_string(coord) +
+                    " out of bounds for axis " + std::to_string(tensor_ax) +
+                    " with size " + std::to_string(tensor->shape[tensor_ax]));
               }
 
-              dst_mat[linear_idx] = upd_mat[i];
+              base_coords[tensor_ax] = coord;
             }
-          },
-          tensor->data);
-    }
+
+            // Iterate over the update slice
+            for (size_t slice_idx = 0; slice_idx < update_slice_size;
+                 ++slice_idx) {
+              // Convert slice index to coordinates in non-indexed dimensions
+              std::vector<int64_t> coords = base_coords;
+              size_t temp = slice_idx;
+              int slice_dim = update_slice_shape.size() - 1;
+              for (int dim = tensor_rank - 1; dim >= 0; --dim) {
+                bool is_indexed = false;
+                for (int ax : axes) {
+                  if (ax == dim) {
+                    is_indexed = true;
+                    break;
+                  }
+                }
+                if (!is_indexed) {
+                  coords[dim] = temp % update_slice_shape[slice_dim];
+                  temp /= update_slice_shape[slice_dim];
+                  slice_dim--;
+                }
+              }
+
+              // Calculate linear indices
+              size_t tensor_linear_idx = 0;
+              for (int dim = 0; dim < tensor_rank; ++dim) {
+                tensor_linear_idx += coords[dim] * tensor_strides[dim];
+              }
+
+              size_t update_linear_idx = i * update_slice_size + slice_idx;
+
+              // Bounds check
+              if (tensor_linear_idx >= dst_mat.size() ||
+                  update_linear_idx >= upd_mat.size()) {
+                throw std::runtime_error("indexed_put: index out of bounds");
+              }
+
+              dst_mat[tensor_linear_idx] = upd_mat[update_linear_idx];
+            }
+          }
+        },
+        tensor->data);
 
     return result;
   } catch (const std::exception &e) {

@@ -556,6 +556,9 @@ defmodule NxEigen.Backend do
   def indexed_add(out, tensor, indices, updates, opts) do
     # Extract axes from opts keyword list
     axes = Keyword.get(opts, :axes, [])
+    # Ensure tensor and updates have the same type as output
+    tensor = maybe_upcast(tensor, out.type)
+    updates = maybe_upcast(updates, out.type)
     state = NxEigen.NIF.indexed_add(tensor.data.state, indices.data.state, updates.data.state, axes)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
@@ -564,20 +567,17 @@ defmodule NxEigen.Backend do
   def indexed_put(out, tensor, indices, updates, opts) do
     # Extract axes from opts keyword list
     axes = Keyword.get(opts, :axes, [])
+    # Ensure tensor and updates have the same type as output
+    tensor = maybe_upcast(tensor, out.type)
+    updates = maybe_upcast(updates, out.type)
     state = NxEigen.NIF.indexed_put(tensor.data.state, indices.data.state, updates.data.state, axes)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
   # Custom reduce
   @impl true
-  def reduce(out, tensor, acc, opts, fun) do
-    # For custom reducers, fall back to BinaryBackend
-    binary_data = to_binary(tensor, :infinity)
-    binary_tensor = Nx.from_binary(binary_data, tensor.type,
-      names: tensor.names,
-      backend: {Nx.BinaryBackend, []})
-    result = Nx.reduce(binary_tensor, acc, opts, fun)
-    from_binary(out, Nx.to_binary(result), [])
+  def reduce(_out, _tensor, _acc, _opts, _fun) do
+    raise "reduce/5 not supported for NxEigen"
   end
 
   # Window operations
