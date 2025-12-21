@@ -15,8 +15,8 @@ defmodule NxEigen.Backend do
   end
 
   @impl true
-  def to_binary(%Nx.Tensor{data: %__MODULE__{state: state}}, _limit) do
-    NxEigen.NIF.to_binary(state)
+  def to_binary(%Nx.Tensor{data: %__MODULE__{state: state}}, limit) do
+    NxEigen.NIF.to_binary(state, limit)
   end
 
   @impl true

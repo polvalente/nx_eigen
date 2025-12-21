@@ -13,7 +13,8 @@ defmodule NxEigen.NIF do
 
   defp from_binary_nif(_binary, _type, _shape), do: :erlang.nif_error(:nif_not_loaded)
 
-  def to_binary(_resource), do: :erlang.nif_error(:nif_not_loaded)
+  def to_binary(resource, limit \\ :infinity), do: to_binary_nif(resource, limit)
+  defp to_binary_nif(_resource, _limit), do: :erlang.nif_error(:nif_not_loaded)
   def as_type(resource, type), do: as_type_nif(resource, type)
 
   defp as_type_nif(_resource, _type), do: :erlang.nif_error(:nif_not_loaded)

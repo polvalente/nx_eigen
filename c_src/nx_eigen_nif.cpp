@@ -224,21 +224,62 @@ as_type_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 }
 FINE_NIF(as_type_nif, 0);
 
-ErlNifBinary to_binary(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor) {
+// Helper class to represent :infinity atom for limit
+struct BinaryLimit {
+  size_t value;
+  bool is_infinity;
+
+  BinaryLimit() : value(0), is_infinity(true) {}
+  BinaryLimit(size_t v) : value(v), is_infinity(false) {}
+};
+
+// Fine decoder for BinaryLimit
+template <> struct fine::Decoder<BinaryLimit> {
+  static BinaryLimit decode(ErlNifEnv *env, const ERL_NIF_TERM &term) {
+    // Try to decode as integer
+    long limit_val;
+    if (enif_get_long(env, term, &limit_val)) {
+      return BinaryLimit(static_cast<size_t>(limit_val));
+    }
+
+    // Try to decode as atom :infinity
+    char atom_buf[16];
+    if (enif_get_atom(env, term, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1) >
+        0) {
+      if (std::string(atom_buf) == "infinity") {
+        return BinaryLimit();
+      }
+    }
+
+    throw std::runtime_error("Limit must be an integer or :infinity");
+  }
+};
+
+ErlNifBinary to_binary_nif(ErlNifEnv *env,
+                           fine::ResourcePtr<EigenTensor> tensor,
+                           BinaryLimit limit) {
   return std::visit(
       [&](auto &arr) {
         ErlNifBinary binary;
-        size_t size =
-            arr.size() * sizeof(typename std::decay_t<decltype(arr)>::Scalar);
-        if (!enif_alloc_binary(size, &binary)) {
+        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
+        size_t scalar_size = sizeof(Scalar);
+
+        // Determine how many elements to include
+        size_t num_elements = arr.size();
+        if (!limit.is_infinity && limit.value < num_elements) {
+          num_elements = limit.value;
+        }
+
+        size_t byte_size = num_elements * scalar_size;
+        if (!enif_alloc_binary(byte_size, &binary)) {
           throw std::runtime_error("Failed to allocate binary");
         }
-        std::memcpy(binary.data, arr.data(), size);
+        std::memcpy(binary.data, arr.data(), byte_size);
         return binary;
       },
       tensor->data);
 }
-FINE_NIF(to_binary, 0);
+FINE_NIF(to_binary_nif, 0);
 
 // --- Safe Helpers for Complex-Sensitive Ops ---
 
@@ -3068,6 +3109,14 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
   for (auto d : output_shape)
     total_out *= d;
 
+  // Pre-calculate output strides
+  std::vector<size_t> output_strides(output_shape.size());
+  size_t out_stride = 1;
+  for (int i = (int)output_shape.size() - 1; i >= 0; --i) {
+    output_strides[i] = out_stride;
+    out_stride *= output_shape[i];
+  }
+
   // For argmax, output is indices, so usually S64 or U64.
   // Nx default is S64.
   auto &out_arr = result->data.emplace<FlatArray<int64_t>>();
@@ -3105,12 +3154,7 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
               out_idx = 0;
               current_axis_idx = i; // Flat index
             } else {
-              size_t out_stride_calc = 1;
-              // We need to map input coords to output coords to linear out_idx
-              // Iterate output dims (which are input dims minus 'axis')
-              // This mapping is trickier.
-
-              // Easier: calculate all input coords
+              // Calculate all input coords
               std::vector<size_t> coords(in_rank);
               size_t t = i;
               for (int d = in_rank - 1; d >= 0; --d) {
@@ -3120,13 +3164,13 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 
               current_axis_idx = coords[axis];
 
-              // calculate out_idx from coords excluding axis
-              size_t mult = 1;
-              for (int d = in_rank - 1; d >= 0; --d) {
-                if (d == axis)
-                  continue;
-                out_idx += coords[d] * mult;
-                mult *= tensor->shape[d];
+              // Map from input coords to output coords (excluding reduced axis)
+              int out_dim = 0;
+              for (int d = 0; d < in_rank; ++d) {
+                if (d != axis) {
+                  out_idx += coords[d] * output_strides[out_dim];
+                  out_dim++;
+                }
               }
             }
 

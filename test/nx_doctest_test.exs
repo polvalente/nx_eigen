@@ -34,9 +34,6 @@ defmodule NxEigen.DocTest do
   doctest Nx,
     except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ [
       :moduledoc,
-      # Binary output operations
-      to_binary: 2,
-      to_flat_list: 2,
       # Pad with interior padding
       pad: 3,
       # Reductions
