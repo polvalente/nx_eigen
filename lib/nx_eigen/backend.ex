@@ -428,7 +428,7 @@ defmodule NxEigen.Backend do
   def argsort(out, tensor, opts) do
     axis = opts[:axis] || -1
     direction = if opts[:direction] == :desc, do: 1, else: 0
-    state = NxEigen.NIF.argsort(tensor.data.state, axis, direction)
+    state = NxEigen.NIF.argsort(tensor.data.state, out.type, axis, direction)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 

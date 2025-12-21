@@ -162,8 +162,8 @@ defmodule NxEigen.NIF do
   def sort(t, axis, direction), do: sort_nif(t, axis, direction)
   defp sort_nif(_t, _axis, _direction), do: :erlang.nif_error(:nif_not_loaded)
 
-  def argsort(t, axis, direction), do: argsort_nif(t, axis, direction)
-  defp argsort_nif(_t, _axis, _direction), do: :erlang.nif_error(:nif_not_loaded)
+  def argsort(t, output_type, axis, direction), do: argsort_nif(t, output_type, axis, direction)
+  defp argsort_nif(_t, _output_type, _axis, _direction), do: :erlang.nif_error(:nif_not_loaded)
 
   # Bit manipulation
   def population_count(t), do: population_count_nif(t)

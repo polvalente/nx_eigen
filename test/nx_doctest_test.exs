@@ -83,10 +83,6 @@ defmodule NxEigen.DocTest do
       put_slice: 3,
       # Concatenate
       concatenate: 2,
-      # Sorting
-      sort: 2,
-      argsort: 2,
-      top_k: 2,
       # Reflection
       reflect: 2,
       # Sigil operations

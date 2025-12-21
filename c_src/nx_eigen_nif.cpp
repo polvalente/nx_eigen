@@ -1185,6 +1185,8 @@ fine::ResourcePtr<EigenTensor> sort_nif(ErlNifEnv *env,
               }
 
               // Sort indices based on values
+              // NaN handling: For ascending, NaN sorts to end; for descending,
+              // NaN sorts to beginning
               if (descending) {
                 std::sort(
                     indices.begin(), indices.end(), [&](size_t a, size_t b) {
@@ -1192,7 +1194,22 @@ fine::ResourcePtr<EigenTensor> sort_nif(ErlNifEnv *env,
                         throw std::runtime_error(
                             "sort_nif: index out of bounds in comparison");
                       }
-                      return dst_mat[a] > dst_mat[b];
+                      Scalar val_a = dst_mat[a];
+                      Scalar val_b = dst_mat[b];
+
+                      // For descending: NaN < everything else
+                      if constexpr (std::is_floating_point_v<Scalar>) {
+                        bool a_is_nan = std::isnan(val_a);
+                        bool b_is_nan = std::isnan(val_b);
+                        if (a_is_nan && b_is_nan)
+                          return false;
+                        if (a_is_nan)
+                          return true; // NaN first in descending
+                        if (b_is_nan)
+                          return false;
+                      }
+
+                      return val_a > val_b;
                     });
               } else {
                 std::sort(
@@ -1201,7 +1218,22 @@ fine::ResourcePtr<EigenTensor> sort_nif(ErlNifEnv *env,
                         throw std::runtime_error(
                             "sort_nif: index out of bounds in comparison");
                       }
-                      return dst_mat[a] < dst_mat[b];
+                      Scalar val_a = dst_mat[a];
+                      Scalar val_b = dst_mat[b];
+
+                      // For ascending: NaN > everything else
+                      if constexpr (std::is_floating_point_v<Scalar>) {
+                        bool a_is_nan = std::isnan(val_a);
+                        bool b_is_nan = std::isnan(val_b);
+                        if (a_is_nan && b_is_nan)
+                          return false;
+                        if (a_is_nan)
+                          return false; // NaN last in ascending
+                        if (b_is_nan)
+                          return true;
+                      }
+
+                      return val_a < val_b;
                     });
               }
 
@@ -1243,8 +1275,8 @@ FINE_NIF(sort_nif, 0);
 
 // Argsort - return indices that would sort the tensor
 fine::ResourcePtr<EigenTensor>
-argsort_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor, int64_t axis,
-            int64_t descending) {
+argsort_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+            ScalarType output_type, int64_t axis, int64_t descending) {
   auto result = fine::make_resource<EigenTensor>();
   result->shape = tensor->shape;
 
@@ -1254,84 +1286,142 @@ argsort_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor, int64_t axis,
   if (axis < 0)
     axis = rank + axis;
 
-  std::visit(
-      [&](auto &src_mat) {
-        using Scalar = typename std::decay_t<decltype(src_mat)>::Scalar;
-        auto &dst_mat = result->data.emplace<FlatArray<int64_t>>();
-        dst_mat.resize(src_mat.size());
+  // Lambda to handle argsort for a given output index type
+  auto do_argsort = [&](auto index_scalar_ptr) {
+    using IndexScalar = std::decay_t<decltype(*index_scalar_ptr)>;
+    std::visit(
+        [&](auto &src_mat) {
+          using Scalar = typename std::decay_t<decltype(src_mat)>::Scalar;
+          auto &dst_mat = result->data.emplace<FlatArray<IndexScalar>>();
+          dst_mat.resize(src_mat.size());
 
-        if constexpr (!Eigen::NumTraits<Scalar>::IsComplex) {
-          size_t outer_size = 1;
-          for (int i = 0; i < axis; ++i)
-            outer_size *= tensor->shape[i];
+          if constexpr (!Eigen::NumTraits<Scalar>::IsComplex) {
+            size_t outer_size = 1;
+            for (int i = 0; i < axis; ++i)
+              outer_size *= tensor->shape[i];
 
-          size_t axis_size = tensor->shape[axis];
+            size_t axis_size = tensor->shape[axis];
 
-          size_t inner_size = 1;
-          for (int i = axis + 1; i < rank; ++i)
-            inner_size *= tensor->shape[i];
+            size_t inner_size = 1;
+            for (int i = axis + 1; i < rank; ++i)
+              inner_size *= tensor->shape[i];
 
-          // Sort along axis
-          for (size_t outer = 0; outer < outer_size; ++outer) {
-            for (size_t inner = 0; inner < inner_size; ++inner) {
-              // Create index array
-              std::vector<int64_t> indices(axis_size);
-              for (size_t i = 0; i < axis_size; ++i) {
-                indices[i] = i;
-              }
-
-              // Sort indices based on values
-              if (descending) {
-                std::sort(indices.begin(), indices.end(),
-                          [&](int64_t a, int64_t b) {
-                            size_t idx_a = outer * axis_size * inner_size +
-                                           a * inner_size + inner;
-                            size_t idx_b = outer * axis_size * inner_size +
-                                           b * inner_size + inner;
-                            if (idx_a >= src_mat.size() ||
-                                idx_b >= src_mat.size()) {
-                              throw std::runtime_error(
-                                  "argsort_nif: index out of bounds in "
-                                  "comparison");
-                            }
-                            return src_mat[idx_a] > src_mat[idx_b];
-                          });
-              } else {
-                std::sort(indices.begin(), indices.end(),
-                          [&](int64_t a, int64_t b) {
-                            size_t idx_a = outer * axis_size * inner_size +
-                                           a * inner_size + inner;
-                            size_t idx_b = outer * axis_size * inner_size +
-                                           b * inner_size + inner;
-                            if (idx_a >= src_mat.size() ||
-                                idx_b >= src_mat.size()) {
-                              throw std::runtime_error(
-                                  "argsort_nif: index out of bounds in "
-                                  "comparison");
-                            }
-                            return src_mat[idx_a] < src_mat[idx_b];
-                          });
-              }
-
-              // Write indices
-              for (size_t i = 0; i < axis_size; ++i) {
-                size_t idx =
-                    outer * axis_size * inner_size + i * inner_size + inner;
-                if (idx >= dst_mat.size()) {
-                  throw std::runtime_error(
-                      "argsort_nif: write index " + std::to_string(idx) +
-                      " out of bounds (size: " +
-                      std::to_string(dst_mat.size()) + ")");
+            // Sort along axis
+            for (size_t outer = 0; outer < outer_size; ++outer) {
+              for (size_t inner = 0; inner < inner_size; ++inner) {
+                // Create index array
+                std::vector<int64_t> indices(axis_size);
+                for (size_t i = 0; i < axis_size; ++i) {
+                  indices[i] = i;
                 }
-                dst_mat[idx] = indices[i];
+
+                // Sort indices based on values
+                // NaN handling: For ascending, NaN sorts to end; for
+                // descending,
+              // NaN sorts to beginning
+                if (descending) {
+                  std::sort(indices.begin(), indices.end(),
+                            [&](int64_t a, int64_t b) {
+                              size_t idx_a = outer * axis_size * inner_size +
+                                             a * inner_size + inner;
+                              size_t idx_b = outer * axis_size * inner_size +
+                                             b * inner_size + inner;
+                              if (idx_a >= src_mat.size() ||
+                                  idx_b >= src_mat.size()) {
+                                throw std::runtime_error(
+                                    "argsort_nif: index out of bounds in "
+                                    "comparison");
+                              }
+
+                              Scalar val_a = src_mat[idx_a];
+                              Scalar val_b = src_mat[idx_b];
+
+                              // For descending: NaN < everything else
+                              if constexpr (std::is_floating_point_v<Scalar>) {
+                                bool a_is_nan = std::isnan(val_a);
+                                bool b_is_nan = std::isnan(val_b);
+                                if (a_is_nan && b_is_nan)
+                                  return false;
+                                if (a_is_nan)
+                                  return true; // NaN first in descending
+                                if (b_is_nan)
+                                  return false;
+                              }
+
+                              return val_a > val_b;
+                            });
+                } else {
+                  std::sort(indices.begin(), indices.end(),
+                            [&](int64_t a, int64_t b) {
+                              size_t idx_a = outer * axis_size * inner_size +
+                                             a * inner_size + inner;
+                              size_t idx_b = outer * axis_size * inner_size +
+                                             b * inner_size + inner;
+                              if (idx_a >= src_mat.size() ||
+                                  idx_b >= src_mat.size()) {
+                                throw std::runtime_error(
+                                    "argsort_nif: index out of bounds in "
+                                    "comparison");
+                              }
+
+                              Scalar val_a = src_mat[idx_a];
+                              Scalar val_b = src_mat[idx_b];
+
+                              // For ascending: NaN > everything else
+                              if constexpr (std::is_floating_point_v<Scalar>) {
+                                bool a_is_nan = std::isnan(val_a);
+                                bool b_is_nan = std::isnan(val_b);
+                                if (a_is_nan && b_is_nan)
+                                  return false;
+                                if (a_is_nan)
+                                  return false; // NaN last in ascending
+                                if (b_is_nan)
+                                  return true;
+                              }
+
+                              return val_a < val_b;
+                            });
+                }
+
+                // Write indices
+                for (size_t i = 0; i < axis_size; ++i) {
+                  size_t idx =
+                      outer * axis_size * inner_size + i * inner_size + inner;
+                  if (idx >= dst_mat.size()) {
+                    throw std::runtime_error(
+                        "argsort_nif: write index " + std::to_string(idx) +
+                        " out of bounds (size: " +
+                        std::to_string(dst_mat.size()) + ")");
+                  }
+                  dst_mat[idx] = static_cast<IndexScalar>(indices[i]);
+                }
               }
             }
+          } else {
+            throw std::runtime_error("Argsort not supported for complex types");
           }
-        } else {
-          throw std::runtime_error("Argsort not supported for complex types");
-        }
-      },
-      tensor->data);
+        },
+        tensor->data);
+  };
+
+  // Call the lambda with the appropriate output index type
+  switch (output_type) {
+  case ScalarType::S32:
+    do_argsort((int32_t *)nullptr);
+    break;
+  case ScalarType::S64:
+    do_argsort((int64_t *)nullptr);
+    break;
+  case ScalarType::U32:
+    do_argsort((uint32_t *)nullptr);
+    break;
+  case ScalarType::U64:
+    do_argsort((uint64_t *)nullptr);
+    break;
+  default:
+    throw std::runtime_error(
+        "Argsort only supports 32/64-bit integer output types");
+  }
 
   return result;
 }
