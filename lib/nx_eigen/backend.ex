@@ -214,6 +214,10 @@ defmodule NxEigen.Backend do
   for op <- @logical_ops do
     @impl true
     def unquote(op)(out, l, r) do
+      # Ensure both have the same type (logical ops work on any integer/float type)
+      common_type = Nx.Type.merge(l.type, r.type)
+      l = maybe_upcast(l, common_type)
+      r = maybe_upcast(r, common_type)
       # Broadcast to output shape
       l = maybe_broadcast(l, out.shape)
       r = maybe_broadcast(r, out.shape)
@@ -257,14 +261,25 @@ defmodule NxEigen.Backend do
     end
   end
 
-  # Unary ops
-  @unary_ops [
+  # Unary ops - math operations that require float types
+  @float_math_ops [
     :exp, :log, :sin, :cos, :tan, :asin, :acos, :atan,
     :sinh, :cosh, :tanh, :asinh, :acosh, :atanh,
-    :abs, :sqrt, :ceil, :floor, :round, :sigmoid, :negate,
-    :cbrt, :expm1, :log1p, :rsqrt, :sign, :erf, :erfc, :conjugate
+    :sqrt, :cbrt, :log1p, :rsqrt, :erf, :erfc
   ]
-  for op <- @unary_ops do
+  for op <- @float_math_ops do
+    @impl true
+    def unquote(op)(out, tensor) do
+      # Auto-upcast integers to output float type
+      tensor = maybe_upcast(tensor, out.type)
+      state = apply(NxEigen.NIF, unquote(op), [tensor.data.state])
+      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    end
+  end
+
+  # Unary ops that work on any type
+  @general_unary_ops [:abs, :ceil, :floor, :round, :negate, :sign]
+  for op <- @general_unary_ops do
     @impl true
     def unquote(op)(out, tensor) do
       state = apply(NxEigen.NIF, unquote(op), [tensor.data.state])
@@ -272,17 +287,15 @@ defmodule NxEigen.Backend do
     end
   end
 
-  # Binary math ops
+  # Complex operations that may need type conversion
   @impl true
-  def atan2(out, l, r) do
-    # Broadcast to output shape
-    l = maybe_broadcast(l, out.shape)
-    r = maybe_broadcast(r, out.shape)
-    state = NxEigen.NIF.atan2(l.data.state, r.data.state)
+  def conjugate(out, tensor) do
+    # Upcast to output type (may convert real to complex)
+    tensor = maybe_upcast(tensor, out.type)
+    state = NxEigen.NIF.conjugate(tensor.data.state)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
-  # Complex extraction ops
   @impl true
   def real(out, tensor) do
     state = NxEigen.NIF.real(tensor.data.state)
@@ -295,9 +308,45 @@ defmodule NxEigen.Backend do
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
+  # Special handling for erf_inv, expm1, sigmoid (precision-sensitive, handled separately)
+  @impl true
+  def erf_inv(out, tensor) do
+    tensor = maybe_upcast(tensor, out.type)
+    state = NxEigen.NIF.erf_inv(tensor.data.state)
+    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+  end
+
+  @impl true
+  def expm1(out, tensor) do
+    tensor = maybe_upcast(tensor, out.type)
+    state = NxEigen.NIF.expm1(tensor.data.state)
+    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+  end
+
+  @impl true
+  def sigmoid(out, tensor) do
+    tensor = maybe_upcast(tensor, out.type)
+    state = NxEigen.NIF.sigmoid(tensor.data.state)
+    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+  end
+
+  # Binary math ops
+  @impl true
+  def atan2(out, l, r) do
+    # Broadcast to output shape
+    l = maybe_broadcast(l, out.shape)
+    r = maybe_broadcast(r, out.shape)
+    state = NxEigen.NIF.atan2(l.data.state, r.data.state)
+    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+  end
+
   # Integer division ops
   @impl true
   def quotient(out, l, r) do
+    # Ensure both have the same type
+    common_type = Nx.Type.merge(l.type, r.type)
+    l = maybe_upcast(l, common_type)
+    r = maybe_upcast(r, common_type)
     # Broadcast to output shape
     l = maybe_broadcast(l, out.shape)
     r = maybe_broadcast(r, out.shape)
@@ -307,6 +356,10 @@ defmodule NxEigen.Backend do
 
   @impl true
   def remainder(out, l, r) do
+    # Ensure both have the same type
+    common_type = Nx.Type.merge(l.type, r.type)
+    l = maybe_upcast(l, common_type)
+    r = maybe_upcast(r, common_type)
     # Broadcast to output shape
     l = maybe_broadcast(l, out.shape)
     r = maybe_broadcast(r, out.shape)
@@ -456,12 +509,6 @@ defmodule NxEigen.Backend do
   def stack(out, tensors, axis) do
     states = Enum.map(tensors, & &1.data.state)
     state = NxEigen.NIF.stack(states, axis)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
-  end
-
-  @impl true
-  def erf_inv(out, tensor) do
-    state = NxEigen.NIF.erf_inv(tensor.data.state)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 

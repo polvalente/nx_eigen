@@ -10,62 +10,40 @@ defmodule NxEigen.DocTest do
 
   @unsupported_types [
       as_type: 2,
-      tensor: 2
+      tensor: 2,
+      # bf16 type tests
+      real: 1,
+      imag: 1
+  ]
+
+  @precision_sensitive [
+      # These tests fail due to minor floating point precision differences
+      erf_inv: 1,
+      expm1: 1,
+      sigmoid: 1,
+      tanh: 1
+  ]
+
+  @sub_byte_types [
+      # Sub-byte types (u2, etc.) not supported
+      bit_size: 1
   ]
 
   # Run Nx's own doctests with NxEigen backend
   # This ensures full compatibility with Nx's documented behavior
   doctest Nx,
-    except: @unsupported_types ++ [
+    except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ [
       :moduledoc,
       # Slicing with tensor indices
       # Diagonal operations (not implemented)
-      take_diagonal: 2,
-      make_diagonal: 2,
-      put_diagonal: 3,
+      # take_diagonal: 2,
+      # make_diagonal: 2,
+      # put_diagonal: 3,
       # Binary output operations
       to_binary: 2,
       to_flat_list: 2,
       # Pad with interior padding
       pad: 3,
-      # Bitwise operations
-      bit_size: 1,
-      # Integer operations
-      remainder: 2,
-      quotient: 2,
-      # Logical operations
-      logical_and: 2,
-      logical_or: 2,
-      logical_xor: 2,
-      # Math operations on integer types
-      acosh: 1,
-      asinh: 1,
-      cbrt: 1,
-      cos: 1,
-      cosh: 1,
-      erf: 1,
-      erf_inv: 1,
-      erfc: 1,
-      exp: 1,
-      expm1: 1,
-      log1p: 1,
-      rsqrt: 1,
-      sigmoid: 1,
-      sin: 1,
-      sinh: 1,
-      sqrt: 1,
-      tan: 1,
-      tanh: 1,
-      log: 1,
-      log: 2,
-      log2: 1,
-      log10: 1,
-      # Unary on wrong types
-      negate: 1,
-      abs: 1,
-      conjugate: 1,
-      real: 1,
-      imag: 1,
       # Reductions
       all: 2,
       any: 2,

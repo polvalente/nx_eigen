@@ -500,7 +500,7 @@ FINE_NIF(bitwise_not_nif, 0);
 
 // Logical ops (element-wise boolean operations)
 // Note: C++ && and || don't work element-wise with Eigen, so we implement
-// manually
+// manually. These always return u8 type.
 static fine::ResourcePtr<EigenTensor>
 logical_and_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
                 fine::ResourcePtr<EigenTensor> right) {
@@ -511,12 +511,12 @@ logical_and_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
         using T = typename std::decay_t<decltype(l_mat)>;
         using Scalar = typename T::Scalar;
         auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
+        auto &res_mat = result->data.emplace<FlatArray<uint8_t>>();
         auto l_bool =
             (l_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
         auto r_bool =
             (r_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
-        res_mat = (l_bool * r_bool).template cast<Scalar>();
+        res_mat = l_bool * r_bool;
       },
       left->data);
   return result;
@@ -533,15 +533,13 @@ logical_or_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
         using T = typename std::decay_t<decltype(l_mat)>;
         using Scalar = typename T::Scalar;
         auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
+        auto &res_mat = result->data.emplace<FlatArray<uint8_t>>();
         auto l_bool =
             (l_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
         auto r_bool =
             (r_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
         // For logical OR: result is 1 if either is non-zero
-        res_mat = (l_bool + r_bool)
-                      .cwiseMin(static_cast<uint8_t>(1))
-                      .template cast<Scalar>();
+        res_mat = (l_bool + r_bool).cwiseMin(static_cast<uint8_t>(1));
       },
       left->data);
   return result;
@@ -559,10 +557,14 @@ logical_xor_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
         using T = typename std::decay_t<decltype(l_mat)>;
         using Scalar = typename T::Scalar;
         auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
-        auto l_bool = l_mat != static_cast<Scalar>(0);
-        auto r_bool = r_mat != static_cast<Scalar>(0);
-        res_mat = (l_bool != r_bool).template cast<Scalar>();
+        auto &res_mat = result->data.emplace<FlatArray<uint8_t>>();
+        auto l_bool = (l_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
+        auto r_bool = (r_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
+        // XOR: different bool values
+        res_mat.resize(l_bool.size());
+        for (size_t i = 0; i < l_bool.size(); ++i) {
+          res_mat[i] = (l_bool[i] != r_bool[i]) ? 1 : 0;
+        }
       },
       left->data);
   return result;
@@ -581,7 +583,22 @@ NX_EIGEN_UNARY_OP(atan_nif, mat.atan());
 NX_EIGEN_UNARY_OP(sinh_nif, mat.sinh());
 NX_EIGEN_UNARY_OP(cosh_nif, mat.cosh());
 NX_EIGEN_UNARY_OP(tanh_nif, mat.tanh());
-NX_EIGEN_UNARY_OP(abs_nif, mat.abs());
+// Abs - works on all types including integers
+static fine::ResourcePtr<EigenTensor>
+abs_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor) {
+  auto result = fine::make_resource<EigenTensor>();
+  result->shape = tensor->shape;
+  std::visit(
+      [&](auto &mat) {
+        using T = typename std::decay_t<decltype(mat)>;
+        auto &res_mat = result->data.emplace<T>();
+        res_mat = mat.abs();
+      },
+      tensor->data);
+  return result;
+}
+FINE_NIF(abs_nif, 0);
+
 NX_EIGEN_UNARY_OP(sqrt_nif, mat.sqrt());
 NX_EIGEN_UNARY_OP(sigmoid_nif, (1.0 + (-mat).exp()).inverse());
 
@@ -600,9 +617,14 @@ negate_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor) {
   std::visit(
       [&](auto &mat) {
         using T = typename std::decay_t<decltype(mat)>;
+        using Scalar = typename T::Scalar;
         auto &res_mat = result->data.emplace<T>();
-        if constexpr (std::is_unsigned_v<typename T::Scalar>) {
-          res_mat = mat; // No-op for unsigned
+        if constexpr (std::is_unsigned_v<Scalar>) {
+          // For unsigned, negate uses two's complement (wraps around)
+          res_mat.resize(mat.size());
+          for (size_t i = 0; i < mat.size(); ++i) {
+            res_mat[i] = static_cast<Scalar>(-static_cast<std::make_signed_t<Scalar>>(mat[i]));
+          }
         } else {
           res_mat = -mat;
         }
@@ -812,50 +834,69 @@ FINE_NIF(imag_nif, 0);
 static fine::ResourcePtr<EigenTensor>
 quotient_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
              fine::ResourcePtr<EigenTensor> right) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = left->shape;
-  std::visit(
-      [&](auto &l_mat) {
-        using T = typename std::decay_t<decltype(l_mat)>;
-        using Scalar = typename T::Scalar;
-        auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
-        if constexpr (std::is_integral_v<Scalar>) {
-          res_mat.resize(l_mat.size());
-          for (size_t i = 0; i < l_mat.size(); ++i) {
-            res_mat[i] = l_mat[i] / r_mat[i];
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = left->shape;
+    std::visit(
+        [&](auto &l_mat) {
+          using T = typename std::decay_t<decltype(l_mat)>;
+          using Scalar = typename T::Scalar;
+          auto &r_mat = std::get<T>(right->data);
+          auto &res_mat = result->data.emplace<T>();
+          if constexpr (std::is_integral_v<Scalar>) {
+            res_mat.resize(l_mat.size());
+            for (size_t i = 0; i < l_mat.size(); ++i) {
+              if (r_mat[i] == 0) {
+                throw std::runtime_error("Division by zero in quotient");
+              }
+              res_mat[i] = l_mat[i] / r_mat[i];
+            }
+          } else {
+            throw std::runtime_error("Quotient only supports integer types");
           }
-        } else {
-          throw std::runtime_error("Quotient only supports integer types");
-        }
-      },
-      left->data);
-  return result;
+        },
+        left->data);
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("quotient_nif error: ") + e.what());
+  }
 }
 FINE_NIF(quotient_nif, 0);
 
 static fine::ResourcePtr<EigenTensor>
 remainder_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
               fine::ResourcePtr<EigenTensor> right) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = left->shape;
-  std::visit(
-      [&](auto &l_mat) {
-        using T = typename std::decay_t<decltype(l_mat)>;
-        using Scalar = typename T::Scalar;
-        auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
-        if constexpr (std::is_integral_v<Scalar>) {
-          res_mat.resize(l_mat.size());
-          for (size_t i = 0; i < l_mat.size(); ++i) {
-            res_mat[i] = l_mat[i] % r_mat[i];
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = left->shape;
+    std::visit(
+        [&](auto &l_mat) {
+          using T = typename std::decay_t<decltype(l_mat)>;
+          using Scalar = typename T::Scalar;
+          auto &r_mat = std::get<T>(right->data);
+          auto &res_mat = result->data.emplace<T>();
+          if constexpr (std::is_integral_v<Scalar>) {
+            res_mat.resize(l_mat.size());
+            for (size_t i = 0; i < l_mat.size(); ++i) {
+              if (r_mat[i] == 0) {
+                throw std::runtime_error("Division by zero in remainder");
+              }
+              res_mat[i] = l_mat[i] % r_mat[i];
+            }
+          } else if constexpr (std::is_floating_point_v<Scalar>) {
+            res_mat.resize(l_mat.size());
+            for (size_t i = 0; i < l_mat.size(); ++i) {
+              res_mat[i] = std::fmod(l_mat[i], r_mat[i]);
+            }
+          } else {
+            throw std::runtime_error("Remainder not supported for complex types");
           }
-        } else {
-          throw std::runtime_error("Remainder only supports integer types");
-        }
-      },
-      left->data);
-  return result;
+        },
+        left->data);
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("remainder_nif error: ") + e.what());
+  }
 }
 FINE_NIF(remainder_nif, 0);
 
