@@ -404,22 +404,35 @@ defmodule NxEigen.Backend do
   end
 
   @impl true
-  def to_batched(_out, tensor, opts) do
-    # Return a stream that yields single tensors
-    _leftover = opts[:leftover]
-    Stream.resource(
-      fn -> {0, tensor} end,
-      fn {index, t} ->
-        if index < elem(t.shape, 0) do
-          slice = Nx.slice_along_axis(t, index, 1, axis: 0)
-          squeezed = Nx.squeeze(slice, axes: [0])
-          {[squeezed], {index + 1, t}}
-        else
-          {:halt, {index, t}}
-        end
-      end,
-      fn _ -> :ok end
-    )
+  def to_batched(out, tensor, opts) do
+    leftover = opts[:leftover]
+
+    batch_size = elem(out.shape, 0)
+    axis_size = elem(tensor.shape, 0)
+
+    remainder = rem(axis_size, batch_size)
+    num_full_batches = div(axis_size, batch_size)
+
+    range =
+      if remainder != 0 and leftover == :repeat do
+        0..num_full_batches
+      else
+        0..(num_full_batches - 1)
+      end
+
+    Stream.map(range, fn batch_idx ->
+      if batch_idx == num_full_batches do
+        # Last incomplete batch with :repeat - pad with repeated elements
+        slice = Nx.slice_along_axis(tensor, batch_idx * batch_size, remainder, axis: 0)
+        # Pad to full batch size by repeating
+        padding_size = batch_size - remainder
+        padding = Nx.slice_along_axis(tensor, 0, padding_size, axis: 0)
+        Nx.concatenate([slice, padding], axis: 0)
+      else
+        # Full batch
+        Nx.slice_along_axis(tensor, batch_idx * batch_size, batch_size, axis: 0)
+      end
+    end)
   end
 
   @impl true

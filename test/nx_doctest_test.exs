@@ -7,13 +7,17 @@ defmodule NxEigen.DocTest do
     :ok
   end
 
+
+  @unsupported_types [
+      as_type: 2,
+      tensor: 2
+  ]
+
   # Run Nx's own doctests with NxEigen backend
   # This ensures full compatibility with Nx's documented behavior
   doctest Nx,
-    except: [
+    except: @unsupported_types ++ [
       :moduledoc,
-      # Unsupported types
-      tensor: 2,
       # Slicing with tensor indices
       # Diagonal operations (not implemented)
       take_diagonal: 2,
@@ -22,10 +26,6 @@ defmodule NxEigen.DocTest do
       # Binary output operations
       to_binary: 2,
       to_flat_list: 2,
-      # Batched operations
-      to_batched: 3,
-      # Type casting issues
-      as_type: 2,
       # Pad with interior padding
       pad: 3,
       # Bitwise operations
