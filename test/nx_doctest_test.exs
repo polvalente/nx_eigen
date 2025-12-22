@@ -52,12 +52,10 @@ defmodule NxEigen.DocTest do
     pinv: 2,
     norm: 2,
     lu: 2,
-    least_squares: 3
+    least_squares: 3,
+    triangular_solve: 3,
+    solve: 2
   ]
 
-  doctest Nx.LinAlg,
-  except: @rounding_error_linalg ++ [
-      solve: 2,
-      triangular_solve: 3
-    ]
+  doctest Nx.LinAlg, except: @rounding_error_linalg
 end

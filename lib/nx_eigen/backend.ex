@@ -217,13 +217,22 @@ defmodule NxEigen.Backend do
     a = ensure_backend(a)
     b = ensure_backend(b)
 
+    # Cast to output type (which is float) to ensure NIF works with floats
+    a = maybe_upcast(a, out.type)
+    b = maybe_upcast(b, out.type)
+
     # Broadcast b to output shape (handles batch broadcasting)
     b = maybe_broadcast(b, out.shape)
 
-    # Broadcast a to match output batch dimensions
-    # a shape is [..., M, M], out shape is [..., M, N]
-    # We want a to have shape [..., M, M] where ... matches out's batch dims
-    batch_dims = Tuple.to_list(out.shape) |> Enum.reverse() |> Enum.drop(2) |> Enum.reverse()
+    # Determine if B is vector-like (rank difference of 1) or matrix-like (rank difference of 0)
+    # We compare ranks of A and OUT.
+    rank_diff = tuple_size(a.shape) - tuple_size(out.shape)
+    is_vector_b = rank_diff == 1
+
+    num_matrix_dims = if is_vector_b, do: 1, else: 2
+
+    # Calculate batch dimensions from output shape
+    batch_dims = Tuple.to_list(out.shape) |> Enum.reverse() |> Enum.drop(num_matrix_dims) |> Enum.reverse()
     a_matrix_dims = Tuple.to_list(a.shape) |> Enum.reverse() |> Enum.take(2) |> Enum.reverse()
     target_a_shape = List.to_tuple(batch_dims ++ a_matrix_dims)
     a = maybe_broadcast(a, target_a_shape)
@@ -235,7 +244,27 @@ defmodule NxEigen.Backend do
       :transpose -> 1
       :adjoint -> 2
     end
-    state = NxEigen.NIF.triangular_solve(a.data.state, b.data.state, lower, left_side, transform_a)
+
+    # Reshape B if it is a vector to make it compatible with C++ NIF (which expects matrix)
+    {b_state, out_needs_reshape} = if is_vector_b do
+      new_shape = if left_side do
+        Tuple.insert_at(out.shape, tuple_size(out.shape), 1)
+      else
+        Tuple.insert_at(out.shape, tuple_size(out.shape) - 1, 1)
+      end
+      {NxEigen.NIF.reshape(b.data.state, new_shape), true}
+    else
+      {b.data.state, false}
+    end
+
+    state = NxEigen.NIF.triangular_solve(a.data.state, b_state, lower, left_side, transform_a)
+
+    state = if out_needs_reshape do
+      NxEigen.NIF.reshape(state, out.shape)
+    else
+      state
+    end
+
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
