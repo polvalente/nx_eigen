@@ -13,7 +13,8 @@ defmodule NxEigen.NIF do
 
   defp from_binary_nif(_binary, _type, _shape), do: :erlang.nif_error(:nif_not_loaded)
 
-  def to_binary(_resource), do: :erlang.nif_error(:nif_not_loaded)
+  def to_binary(resource, limit \\ :infinity), do: to_binary_nif(resource, limit)
+  defp to_binary_nif(_resource, _limit), do: :erlang.nif_error(:nif_not_loaded)
   def as_type(resource, type), do: as_type_nif(resource, type)
 
   defp as_type_nif(_resource, _type), do: :erlang.nif_error(:nif_not_loaded)
@@ -61,11 +62,11 @@ defmodule NxEigen.NIF do
   defp any_nif(_tensor, _axes), do: :erlang.nif_error(:nif_not_loaded)
 
   # Arg reductions
-  def argmax(tensor, axis), do: argmax_nif(tensor, axis)
-  defp argmax_nif(_tensor, _axis), do: :erlang.nif_error(:nif_not_loaded)
+  def argmax(tensor, axis, tie_break), do: argmax_nif(tensor, axis, tie_break)
+  defp argmax_nif(_tensor, _axis, _tie_break), do: :erlang.nif_error(:nif_not_loaded)
 
-  def argmin(tensor, axis), do: argmin_nif(tensor, axis)
-  defp argmin_nif(_tensor, _axis), do: :erlang.nif_error(:nif_not_loaded)
+  def argmin(tensor, axis, tie_break), do: argmin_nif(tensor, axis, tie_break)
+  defp argmin_nif(_tensor, _axis, _tie_break), do: :erlang.nif_error(:nif_not_loaded)
 
   # Slicing & Indexing
   def slice(tensor, starts, lengths, strides), do: slice_nif(tensor, starts, lengths, strides)
@@ -162,8 +163,8 @@ defmodule NxEigen.NIF do
   def sort(t, axis, direction), do: sort_nif(t, axis, direction)
   defp sort_nif(_t, _axis, _direction), do: :erlang.nif_error(:nif_not_loaded)
 
-  def argsort(t, axis, direction), do: argsort_nif(t, axis, direction)
-  defp argsort_nif(_t, _axis, _direction), do: :erlang.nif_error(:nif_not_loaded)
+  def argsort(t, output_type, axis, direction), do: argsort_nif(t, output_type, axis, direction)
+  defp argsort_nif(_t, _output_type, _axis, _direction), do: :erlang.nif_error(:nif_not_loaded)
 
   # Bit manipulation
   def population_count(t), do: population_count_nif(t)
@@ -190,25 +191,35 @@ defmodule NxEigen.NIF do
   defp indexed_put_nif(_tensor, _indices, _updates, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
   # Window operations
-  def window_sum(tensor, window_dims, opts), do: window_sum_nif(tensor, window_dims, opts)
+  def window_sum(tensor, window_dims, opts) do
+    window_sum_nif(tensor, Tuple.to_list(window_dims), opts)
+  end
   defp window_sum_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_product(tensor, window_dims, opts), do: window_product_nif(tensor, window_dims, opts)
+  def window_product(tensor, window_dims, opts) do
+    window_product_nif(tensor, Tuple.to_list(window_dims), opts)
+  end
   defp window_product_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_max(tensor, window_dims, opts), do: window_max_nif(tensor, window_dims, opts)
+  def window_max(tensor, window_dims, opts) do
+    window_max_nif(tensor, Tuple.to_list(window_dims), opts)
+  end
   defp window_max_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_min(tensor, window_dims, opts), do: window_min_nif(tensor, window_dims, opts)
+  def window_min(tensor, window_dims, opts) do
+    window_min_nif(tensor, Tuple.to_list(window_dims), opts)
+  end
   defp window_min_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_scatter_max(tensor, source, init_val, window_dims, opts),
-    do: window_scatter_max_nif(tensor, source, init_val, window_dims, opts)
+  def window_scatter_max(tensor, source, init_val, window_dims, opts) do
+    window_scatter_max_nif(tensor, source, init_val, Tuple.to_list(window_dims), opts)
+  end
   defp window_scatter_max_nif(_tensor, _source, _init_val, _window_dims, _opts),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def window_scatter_min(tensor, source, init_val, window_dims, opts),
-    do: window_scatter_min_nif(tensor, source, init_val, window_dims, opts)
+  def window_scatter_min(tensor, source, init_val, window_dims, opts) do
+    window_scatter_min_nif(tensor, source, init_val, Tuple.to_list(window_dims), opts)
+  end
   defp window_scatter_min_nif(_tensor, _source, _init_val, _window_dims, _opts),
     do: :erlang.nif_error(:nif_not_loaded)
 

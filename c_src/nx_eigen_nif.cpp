@@ -2,6 +2,7 @@
 #include <complex>
 #include <fftw3.h>
 #include <fine.hpp>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -224,21 +225,62 @@ as_type_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 }
 FINE_NIF(as_type_nif, 0);
 
-ErlNifBinary to_binary(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor) {
+// Helper class to represent :infinity atom for limit
+struct BinaryLimit {
+  size_t value;
+  bool is_infinity;
+
+  BinaryLimit() : value(0), is_infinity(true) {}
+  BinaryLimit(size_t v) : value(v), is_infinity(false) {}
+};
+
+// Fine decoder for BinaryLimit
+template <> struct fine::Decoder<BinaryLimit> {
+  static BinaryLimit decode(ErlNifEnv *env, const ERL_NIF_TERM &term) {
+    // Try to decode as integer
+    long limit_val;
+    if (enif_get_long(env, term, &limit_val)) {
+      return BinaryLimit(static_cast<size_t>(limit_val));
+    }
+
+    // Try to decode as atom :infinity
+    char atom_buf[16];
+    if (enif_get_atom(env, term, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1) >
+        0) {
+      if (std::string(atom_buf) == "infinity") {
+        return BinaryLimit();
+      }
+    }
+
+    throw std::runtime_error("Limit must be an integer or :infinity");
+  }
+};
+
+ErlNifBinary to_binary_nif(ErlNifEnv *env,
+                           fine::ResourcePtr<EigenTensor> tensor,
+                           BinaryLimit limit) {
   return std::visit(
       [&](auto &arr) {
         ErlNifBinary binary;
-        size_t size =
-            arr.size() * sizeof(typename std::decay_t<decltype(arr)>::Scalar);
-        if (!enif_alloc_binary(size, &binary)) {
+        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
+        size_t scalar_size = sizeof(Scalar);
+
+        // Determine how many elements to include
+        size_t num_elements = arr.size();
+        if (!limit.is_infinity && limit.value < num_elements) {
+          num_elements = limit.value;
+        }
+
+        size_t byte_size = num_elements * scalar_size;
+        if (!enif_alloc_binary(byte_size, &binary)) {
           throw std::runtime_error("Failed to allocate binary");
         }
-        std::memcpy(binary.data, arr.data(), size);
+        std::memcpy(binary.data, arr.data(), byte_size);
         return binary;
       },
       tensor->data);
 }
-FINE_NIF(to_binary, 0);
+FINE_NIF(to_binary_nif, 0);
 
 // --- Safe Helpers for Complex-Sensitive Ops ---
 
@@ -254,6 +296,17 @@ template <typename T> auto safe_max(const T &a, const T &b) {
     return a;
   else
     return a.max(b);
+}
+
+template <typename T> auto safe_atan2(const T &y, const T &x) {
+  using Scalar = typename T::Scalar;
+  if constexpr (Eigen::NumTraits<Scalar>::IsComplex) {
+    throw std::runtime_error("atan2 not supported for complex types");
+  } else {
+    return y.binaryExpr(x, [](Scalar a, Scalar b) {
+      return static_cast<Scalar>(std::atan2(a, b));
+    });
+  }
 }
 
 template <typename T> auto safe_ceil(const T &a) {
@@ -500,7 +553,7 @@ FINE_NIF(bitwise_not_nif, 0);
 
 // Logical ops (element-wise boolean operations)
 // Note: C++ && and || don't work element-wise with Eigen, so we implement
-// manually
+// manually. These always return u8 type.
 static fine::ResourcePtr<EigenTensor>
 logical_and_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
                 fine::ResourcePtr<EigenTensor> right) {
@@ -511,12 +564,12 @@ logical_and_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
         using T = typename std::decay_t<decltype(l_mat)>;
         using Scalar = typename T::Scalar;
         auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
+        auto &res_mat = result->data.emplace<FlatArray<uint8_t>>();
         auto l_bool =
             (l_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
         auto r_bool =
             (r_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
-        res_mat = (l_bool * r_bool).template cast<Scalar>();
+        res_mat = l_bool * r_bool;
       },
       left->data);
   return result;
@@ -533,15 +586,13 @@ logical_or_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
         using T = typename std::decay_t<decltype(l_mat)>;
         using Scalar = typename T::Scalar;
         auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
+        auto &res_mat = result->data.emplace<FlatArray<uint8_t>>();
         auto l_bool =
             (l_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
         auto r_bool =
             (r_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
         // For logical OR: result is 1 if either is non-zero
-        res_mat = (l_bool + r_bool)
-                      .cwiseMin(static_cast<uint8_t>(1))
-                      .template cast<Scalar>();
+        res_mat = (l_bool + r_bool).cwiseMin(static_cast<uint8_t>(1));
       },
       left->data);
   return result;
@@ -559,10 +610,14 @@ logical_xor_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
         using T = typename std::decay_t<decltype(l_mat)>;
         using Scalar = typename T::Scalar;
         auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
-        auto l_bool = l_mat != static_cast<Scalar>(0);
-        auto r_bool = r_mat != static_cast<Scalar>(0);
-        res_mat = (l_bool != r_bool).template cast<Scalar>();
+        auto &res_mat = result->data.emplace<FlatArray<uint8_t>>();
+        auto l_bool = (l_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
+        auto r_bool = (r_mat != static_cast<Scalar>(0)).template cast<uint8_t>();
+        // XOR: different bool values
+        res_mat.resize(l_bool.size());
+        for (size_t i = 0; i < l_bool.size(); ++i) {
+          res_mat[i] = (l_bool[i] != r_bool[i]) ? 1 : 0;
+        }
       },
       left->data);
   return result;
@@ -581,7 +636,33 @@ NX_EIGEN_UNARY_OP(atan_nif, mat.atan());
 NX_EIGEN_UNARY_OP(sinh_nif, mat.sinh());
 NX_EIGEN_UNARY_OP(cosh_nif, mat.cosh());
 NX_EIGEN_UNARY_OP(tanh_nif, mat.tanh());
-NX_EIGEN_UNARY_OP(abs_nif, mat.abs());
+// Abs - works on all types including integers
+static fine::ResourcePtr<EigenTensor>
+abs_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor) {
+  auto result = fine::make_resource<EigenTensor>();
+  result->shape = tensor->shape;
+  std::visit(
+      [&](auto &mat) {
+        using T = typename std::decay_t<decltype(mat)>;
+        using Scalar = typename T::Scalar;
+
+        if constexpr (Eigen::NumTraits<Scalar>::IsComplex) {
+          // For complex types, abs returns real values
+          using RealScalar = typename Eigen::NumTraits<Scalar>::Real;
+          using RealArray = FlatArray<RealScalar>;
+          auto &res_mat = result->data.emplace<RealArray>();
+          res_mat = mat.abs();
+        } else {
+          // For real and integer types, abs returns the same type
+          auto &res_mat = result->data.emplace<T>();
+          res_mat = mat.abs();
+        }
+      },
+      tensor->data);
+  return result;
+}
+FINE_NIF(abs_nif, 0);
+
 NX_EIGEN_UNARY_OP(sqrt_nif, mat.sqrt());
 NX_EIGEN_UNARY_OP(sigmoid_nif, (1.0 + (-mat).exp()).inverse());
 
@@ -600,9 +681,14 @@ negate_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor) {
   std::visit(
       [&](auto &mat) {
         using T = typename std::decay_t<decltype(mat)>;
+        using Scalar = typename T::Scalar;
         auto &res_mat = result->data.emplace<T>();
-        if constexpr (std::is_unsigned_v<typename T::Scalar>) {
-          res_mat = mat; // No-op for unsigned
+        if constexpr (std::is_unsigned_v<Scalar>) {
+          // For unsigned, negate uses two's complement (wraps around)
+          res_mat.resize(mat.size());
+          for (size_t i = 0; i < mat.size(); ++i) {
+            res_mat[i] = static_cast<Scalar>(-static_cast<std::make_signed_t<Scalar>>(mat[i]));
+          }
         } else {
           res_mat = -mat;
         }
@@ -714,30 +800,7 @@ sign_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor) {
 FINE_NIF(sign_nif, 0);
 
 // Atan2 (real types only)
-static fine::ResourcePtr<EigenTensor>
-atan2_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
-          fine::ResourcePtr<EigenTensor> right) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = left->shape;
-  std::visit(
-      [&](auto &l_mat) {
-        using T = typename std::decay_t<decltype(l_mat)>;
-        using Scalar = typename T::Scalar;
-        auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
-        if constexpr (!Eigen::NumTraits<Scalar>::IsComplex) {
-          res_mat.resize(l_mat.size());
-          for (size_t i = 0; i < l_mat.size(); ++i) {
-            res_mat[i] = std::atan2(l_mat[i], r_mat[i]);
-          }
-        } else {
-          throw std::runtime_error("Atan2 not supported for complex types");
-        }
-      },
-      left->data);
-  return result;
-}
-FINE_NIF(atan2_nif, 0);
+NX_EIGEN_BINARY_REAL_OP(atan2_nif, safe_atan2(l_mat, r_mat));
 
 // Complex operations
 static fine::ResourcePtr<EigenTensor>
@@ -812,50 +875,69 @@ FINE_NIF(imag_nif, 0);
 static fine::ResourcePtr<EigenTensor>
 quotient_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
              fine::ResourcePtr<EigenTensor> right) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = left->shape;
-  std::visit(
-      [&](auto &l_mat) {
-        using T = typename std::decay_t<decltype(l_mat)>;
-        using Scalar = typename T::Scalar;
-        auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
-        if constexpr (std::is_integral_v<Scalar>) {
-          res_mat.resize(l_mat.size());
-          for (size_t i = 0; i < l_mat.size(); ++i) {
-            res_mat[i] = l_mat[i] / r_mat[i];
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = left->shape;
+    std::visit(
+        [&](auto &l_mat) {
+          using T = typename std::decay_t<decltype(l_mat)>;
+          using Scalar = typename T::Scalar;
+          auto &r_mat = std::get<T>(right->data);
+          auto &res_mat = result->data.emplace<T>();
+          if constexpr (std::is_integral_v<Scalar>) {
+            res_mat.resize(l_mat.size());
+            for (size_t i = 0; i < l_mat.size(); ++i) {
+              if (r_mat[i] == 0) {
+                throw std::runtime_error("Division by zero in quotient");
+              }
+              res_mat[i] = l_mat[i] / r_mat[i];
+            }
+          } else {
+            throw std::runtime_error("Quotient only supports integer types");
           }
-        } else {
-          throw std::runtime_error("Quotient only supports integer types");
-        }
-      },
-      left->data);
-  return result;
+        },
+        left->data);
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("quotient_nif error: ") + e.what());
+  }
 }
 FINE_NIF(quotient_nif, 0);
 
 static fine::ResourcePtr<EigenTensor>
 remainder_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
               fine::ResourcePtr<EigenTensor> right) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = left->shape;
-  std::visit(
-      [&](auto &l_mat) {
-        using T = typename std::decay_t<decltype(l_mat)>;
-        using Scalar = typename T::Scalar;
-        auto &r_mat = std::get<T>(right->data);
-        auto &res_mat = result->data.emplace<T>();
-        if constexpr (std::is_integral_v<Scalar>) {
-          res_mat.resize(l_mat.size());
-          for (size_t i = 0; i < l_mat.size(); ++i) {
-            res_mat[i] = l_mat[i] % r_mat[i];
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = left->shape;
+    std::visit(
+        [&](auto &l_mat) {
+          using T = typename std::decay_t<decltype(l_mat)>;
+          using Scalar = typename T::Scalar;
+          auto &r_mat = std::get<T>(right->data);
+          auto &res_mat = result->data.emplace<T>();
+          if constexpr (std::is_integral_v<Scalar>) {
+            res_mat.resize(l_mat.size());
+            for (size_t i = 0; i < l_mat.size(); ++i) {
+              if (r_mat[i] == 0) {
+                throw std::runtime_error("Division by zero in remainder");
+              }
+              res_mat[i] = l_mat[i] % r_mat[i];
+            }
+          } else if constexpr (std::is_floating_point_v<Scalar>) {
+            res_mat.resize(l_mat.size());
+            for (size_t i = 0; i < l_mat.size(); ++i) {
+              res_mat[i] = std::fmod(l_mat[i], r_mat[i]);
+            }
+          } else {
+            throw std::runtime_error("Remainder not supported for complex types");
           }
-        } else {
-          throw std::runtime_error("Remainder only supports integer types");
-        }
-      },
-      left->data);
-  return result;
+        },
+        left->data);
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("remainder_nif error: ") + e.what());
+  }
 }
 FINE_NIF(remainder_nif, 0);
 
@@ -934,7 +1016,8 @@ clip_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor, double min_val,
         if constexpr (!Eigen::NumTraits<Scalar>::IsComplex) {
           Scalar min_s = static_cast<Scalar>(min_val);
           Scalar max_s = static_cast<Scalar>(max_val);
-          res_mat = mat.max(min_s).min(max_s);
+          res_mat.resize(mat.size());
+          res_mat = mat.cwiseMax(min_s).cwiseMin(max_s);
         } else {
           throw std::runtime_error("Clip not supported for complex types");
         }
@@ -1014,82 +1097,86 @@ fine::ResourcePtr<EigenTensor>
 concatenate_nif(ErlNifEnv *env,
                 std::vector<fine::ResourcePtr<EigenTensor>> tensors,
                 int64_t axis) {
-  if (tensors.empty()) {
-    throw std::runtime_error("Cannot concatenate empty list of tensors");
-  }
+  try {
+    if (tensors.empty()) {
+      throw std::runtime_error("Cannot concatenate empty list of tensors");
+    }
 
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = tensors[0]->shape;
-  result->shape[axis] = 0;
-  for (const auto &t : tensors) {
-    result->shape[axis] += t->shape[axis];
-  }
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = tensors[0]->shape;
+    result->shape[axis] = 0;
+    for (const auto &t : tensors) {
+      result->shape[axis] += t->shape[axis];
+    }
 
-  std::visit(
-      [&](auto &first_mat) {
-        using T = typename std::decay_t<decltype(first_mat)>;
-        auto &res_mat = result->data.emplace<T>();
+    std::visit(
+        [&](auto &first_mat) {
+          using T = typename std::decay_t<decltype(first_mat)>;
+          auto &res_mat = result->data.emplace<T>();
 
-        size_t total_size = 1;
-        for (auto dim : result->shape)
-          total_size *= dim;
-        res_mat.resize(total_size);
+          size_t total_size = 1;
+          for (auto dim : result->shape)
+            total_size *= dim;
+          res_mat.resize(total_size);
 
-        // Calculate strides
-        int rank = result->shape.size();
-        std::vector<size_t> out_strides(rank);
-        size_t stride = 1;
-        for (int i = rank - 1; i >= 0; --i) {
-          out_strides[i] = stride;
-          stride *= result->shape[i];
-        }
-
-        // Copy each tensor
-        size_t offset_along_axis = 0;
-        for (const auto &tensor : tensors) {
-          auto &src_mat = std::get<T>(tensor->data);
-          std::vector<size_t> src_strides(rank);
-          size_t src_stride = 1;
+          // Calculate strides
+          int rank = result->shape.size();
+          std::vector<size_t> out_strides(rank);
+          size_t stride = 1;
           for (int i = rank - 1; i >= 0; --i) {
-            src_strides[i] = src_stride;
-            src_stride *= tensor->shape[i];
+            out_strides[i] = stride;
+            stride *= result->shape[i];
           }
 
-          for (size_t src_idx = 0; src_idx < src_mat.size(); ++src_idx) {
-            // Decode src_idx to coordinates
-            std::vector<size_t> coords(rank);
-            size_t temp = src_idx;
-            for (int d = rank - 1; d >= 0; --d) {
-              coords[d] = temp % tensor->shape[d];
-              temp /= tensor->shape[d];
+          // Copy each tensor
+          size_t offset_along_axis = 0;
+          for (const auto &tensor : tensors) {
+            auto &src_mat = std::get<T>(tensor->data);
+            std::vector<size_t> src_strides(rank);
+            size_t src_stride = 1;
+            for (int i = rank - 1; i >= 0; --i) {
+              src_strides[i] = src_stride;
+              src_stride *= tensor->shape[i];
             }
 
-            // Add offset along concatenation axis
-            coords[axis] += offset_along_axis;
+            for (size_t src_idx = 0; src_idx < src_mat.size(); ++src_idx) {
+              // Decode src_idx to coordinates
+              std::vector<size_t> coords(rank);
+              size_t temp = src_idx;
+              for (int d = rank - 1; d >= 0; --d) {
+                coords[d] = temp % tensor->shape[d];
+                temp /= tensor->shape[d];
+              }
 
-            // Encode to output index
-            size_t out_idx = 0;
-            for (int d = 0; d < rank; ++d) {
-              out_idx += coords[d] * out_strides[d];
+              // Add offset along concatenation axis
+              coords[axis] += offset_along_axis;
+
+              // Encode to output index
+              size_t out_idx = 0;
+              for (int d = 0; d < rank; ++d) {
+                out_idx += coords[d] * out_strides[d];
+              }
+
+              // Bounds check
+              if (out_idx >= total_size) {
+                throw std::runtime_error(
+                    "concatenate_nif: computed output index " +
+                    std::to_string(out_idx) + " out of bounds (size: " +
+                    std::to_string(total_size) + ")");
+              }
+
+              res_mat[out_idx] = src_mat[src_idx];
             }
 
-            // Bounds check
-            if (out_idx >= total_size) {
-              throw std::runtime_error(
-                  "concatenate_nif: computed output index " +
-                  std::to_string(out_idx) +
-                  " out of bounds (size: " + std::to_string(total_size) + ")");
-            }
-
-            res_mat[out_idx] = src_mat[src_idx];
+            offset_along_axis += tensor->shape[axis];
           }
+        },
+        tensors[0]->data);
 
-          offset_along_axis += tensor->shape[axis];
-        }
-      },
-      tensors[0]->data);
-
-  return result;
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("concatenate_nif error: ") + e.what());
+  }
 }
 FINE_NIF(concatenate_nif, 0);
 
@@ -1144,6 +1231,8 @@ fine::ResourcePtr<EigenTensor> sort_nif(ErlNifEnv *env,
               }
 
               // Sort indices based on values
+              // NaN handling: For ascending, NaN sorts to end; for descending,
+              // NaN sorts to beginning
               if (descending) {
                 std::sort(
                     indices.begin(), indices.end(), [&](size_t a, size_t b) {
@@ -1151,7 +1240,22 @@ fine::ResourcePtr<EigenTensor> sort_nif(ErlNifEnv *env,
                         throw std::runtime_error(
                             "sort_nif: index out of bounds in comparison");
                       }
-                      return dst_mat[a] > dst_mat[b];
+                      Scalar val_a = dst_mat[a];
+                      Scalar val_b = dst_mat[b];
+
+                      // For descending: NaN < everything else
+                      if constexpr (std::is_floating_point_v<Scalar>) {
+                        bool a_is_nan = std::isnan(val_a);
+                        bool b_is_nan = std::isnan(val_b);
+                        if (a_is_nan && b_is_nan)
+                          return false;
+                        if (a_is_nan)
+                          return true; // NaN first in descending
+                        if (b_is_nan)
+                          return false;
+                      }
+
+                      return val_a > val_b;
                     });
               } else {
                 std::sort(
@@ -1160,7 +1264,22 @@ fine::ResourcePtr<EigenTensor> sort_nif(ErlNifEnv *env,
                         throw std::runtime_error(
                             "sort_nif: index out of bounds in comparison");
                       }
-                      return dst_mat[a] < dst_mat[b];
+                      Scalar val_a = dst_mat[a];
+                      Scalar val_b = dst_mat[b];
+
+                      // For ascending: NaN > everything else
+                      if constexpr (std::is_floating_point_v<Scalar>) {
+                        bool a_is_nan = std::isnan(val_a);
+                        bool b_is_nan = std::isnan(val_b);
+                        if (a_is_nan && b_is_nan)
+                          return false;
+                        if (a_is_nan)
+                          return false; // NaN last in ascending
+                        if (b_is_nan)
+                          return true;
+                      }
+
+                      return val_a < val_b;
                     });
               }
 
@@ -1202,8 +1321,8 @@ FINE_NIF(sort_nif, 0);
 
 // Argsort - return indices that would sort the tensor
 fine::ResourcePtr<EigenTensor>
-argsort_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor, int64_t axis,
-            int64_t descending) {
+argsort_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+            ScalarType output_type, int64_t axis, int64_t descending) {
   auto result = fine::make_resource<EigenTensor>();
   result->shape = tensor->shape;
 
@@ -1213,84 +1332,142 @@ argsort_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor, int64_t axis,
   if (axis < 0)
     axis = rank + axis;
 
-  std::visit(
-      [&](auto &src_mat) {
-        using Scalar = typename std::decay_t<decltype(src_mat)>::Scalar;
-        auto &dst_mat = result->data.emplace<FlatArray<int64_t>>();
-        dst_mat.resize(src_mat.size());
+  // Lambda to handle argsort for a given output index type
+  auto do_argsort = [&](auto index_scalar_ptr) {
+    using IndexScalar = std::decay_t<decltype(*index_scalar_ptr)>;
+    std::visit(
+        [&](auto &src_mat) {
+          using Scalar = typename std::decay_t<decltype(src_mat)>::Scalar;
+          auto &dst_mat = result->data.emplace<FlatArray<IndexScalar>>();
+          dst_mat.resize(src_mat.size());
 
-        if constexpr (!Eigen::NumTraits<Scalar>::IsComplex) {
-          size_t outer_size = 1;
-          for (int i = 0; i < axis; ++i)
-            outer_size *= tensor->shape[i];
+          if constexpr (!Eigen::NumTraits<Scalar>::IsComplex) {
+            size_t outer_size = 1;
+            for (int i = 0; i < axis; ++i)
+              outer_size *= tensor->shape[i];
 
-          size_t axis_size = tensor->shape[axis];
+            size_t axis_size = tensor->shape[axis];
 
-          size_t inner_size = 1;
-          for (int i = axis + 1; i < rank; ++i)
-            inner_size *= tensor->shape[i];
+            size_t inner_size = 1;
+            for (int i = axis + 1; i < rank; ++i)
+              inner_size *= tensor->shape[i];
 
-          // Sort along axis
-          for (size_t outer = 0; outer < outer_size; ++outer) {
-            for (size_t inner = 0; inner < inner_size; ++inner) {
-              // Create index array
-              std::vector<int64_t> indices(axis_size);
-              for (size_t i = 0; i < axis_size; ++i) {
-                indices[i] = i;
-              }
-
-              // Sort indices based on values
-              if (descending) {
-                std::sort(indices.begin(), indices.end(),
-                          [&](int64_t a, int64_t b) {
-                            size_t idx_a = outer * axis_size * inner_size +
-                                           a * inner_size + inner;
-                            size_t idx_b = outer * axis_size * inner_size +
-                                           b * inner_size + inner;
-                            if (idx_a >= src_mat.size() ||
-                                idx_b >= src_mat.size()) {
-                              throw std::runtime_error(
-                                  "argsort_nif: index out of bounds in "
-                                  "comparison");
-                            }
-                            return src_mat[idx_a] > src_mat[idx_b];
-                          });
-              } else {
-                std::sort(indices.begin(), indices.end(),
-                          [&](int64_t a, int64_t b) {
-                            size_t idx_a = outer * axis_size * inner_size +
-                                           a * inner_size + inner;
-                            size_t idx_b = outer * axis_size * inner_size +
-                                           b * inner_size + inner;
-                            if (idx_a >= src_mat.size() ||
-                                idx_b >= src_mat.size()) {
-                              throw std::runtime_error(
-                                  "argsort_nif: index out of bounds in "
-                                  "comparison");
-                            }
-                            return src_mat[idx_a] < src_mat[idx_b];
-                          });
-              }
-
-              // Write indices
-              for (size_t i = 0; i < axis_size; ++i) {
-                size_t idx =
-                    outer * axis_size * inner_size + i * inner_size + inner;
-                if (idx >= dst_mat.size()) {
-                  throw std::runtime_error(
-                      "argsort_nif: write index " + std::to_string(idx) +
-                      " out of bounds (size: " +
-                      std::to_string(dst_mat.size()) + ")");
+            // Sort along axis
+            for (size_t outer = 0; outer < outer_size; ++outer) {
+              for (size_t inner = 0; inner < inner_size; ++inner) {
+                // Create index array
+                std::vector<int64_t> indices(axis_size);
+                for (size_t i = 0; i < axis_size; ++i) {
+                  indices[i] = i;
                 }
-                dst_mat[idx] = indices[i];
+
+                // Sort indices based on values
+                // NaN handling: For ascending, NaN sorts to end; for
+                // descending,
+              // NaN sorts to beginning
+                if (descending) {
+                  std::sort(indices.begin(), indices.end(),
+                            [&](int64_t a, int64_t b) {
+                              size_t idx_a = outer * axis_size * inner_size +
+                                             a * inner_size + inner;
+                              size_t idx_b = outer * axis_size * inner_size +
+                                             b * inner_size + inner;
+                              if (idx_a >= src_mat.size() ||
+                                  idx_b >= src_mat.size()) {
+                                throw std::runtime_error(
+                                    "argsort_nif: index out of bounds in "
+                                    "comparison");
+                              }
+
+                              Scalar val_a = src_mat[idx_a];
+                              Scalar val_b = src_mat[idx_b];
+
+                              // For descending: NaN < everything else
+                              if constexpr (std::is_floating_point_v<Scalar>) {
+                                bool a_is_nan = std::isnan(val_a);
+                                bool b_is_nan = std::isnan(val_b);
+                                if (a_is_nan && b_is_nan)
+                                  return false;
+                                if (a_is_nan)
+                                  return true; // NaN first in descending
+                                if (b_is_nan)
+                                  return false;
+                              }
+
+                              return val_a > val_b;
+                            });
+                } else {
+                  std::sort(indices.begin(), indices.end(),
+                            [&](int64_t a, int64_t b) {
+                              size_t idx_a = outer * axis_size * inner_size +
+                                             a * inner_size + inner;
+                              size_t idx_b = outer * axis_size * inner_size +
+                                             b * inner_size + inner;
+                              if (idx_a >= src_mat.size() ||
+                                  idx_b >= src_mat.size()) {
+                                throw std::runtime_error(
+                                    "argsort_nif: index out of bounds in "
+                                    "comparison");
+                              }
+
+                              Scalar val_a = src_mat[idx_a];
+                              Scalar val_b = src_mat[idx_b];
+
+                              // For ascending: NaN > everything else
+                              if constexpr (std::is_floating_point_v<Scalar>) {
+                                bool a_is_nan = std::isnan(val_a);
+                                bool b_is_nan = std::isnan(val_b);
+                                if (a_is_nan && b_is_nan)
+                                  return false;
+                                if (a_is_nan)
+                                  return false; // NaN last in ascending
+                                if (b_is_nan)
+                                  return true;
+                              }
+
+                              return val_a < val_b;
+                            });
+                }
+
+                // Write indices
+                for (size_t i = 0; i < axis_size; ++i) {
+                  size_t idx =
+                      outer * axis_size * inner_size + i * inner_size + inner;
+                  if (idx >= dst_mat.size()) {
+                    throw std::runtime_error(
+                        "argsort_nif: write index " + std::to_string(idx) +
+                        " out of bounds (size: " +
+                        std::to_string(dst_mat.size()) + ")");
+                  }
+                  dst_mat[idx] = static_cast<IndexScalar>(indices[i]);
+                }
               }
             }
+          } else {
+            throw std::runtime_error("Argsort not supported for complex types");
           }
-        } else {
-          throw std::runtime_error("Argsort not supported for complex types");
-        }
-      },
-      tensor->data);
+        },
+        tensor->data);
+  };
+
+  // Call the lambda with the appropriate output index type
+  switch (output_type) {
+  case ScalarType::S32:
+    do_argsort((int32_t *)nullptr);
+    break;
+  case ScalarType::S64:
+    do_argsort((int64_t *)nullptr);
+    break;
+  case ScalarType::U32:
+    do_argsort((uint32_t *)nullptr);
+    break;
+  case ScalarType::U64:
+    do_argsort((uint64_t *)nullptr);
+    break;
+  default:
+    throw std::runtime_error(
+        "Argsort only supports 32/64-bit integer output types");
+  }
 
   return result;
 }
@@ -1594,31 +1771,144 @@ fine::ResourcePtr<EigenTensor>
 indexed_add_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
                 fine::ResourcePtr<EigenTensor> indices,
                 fine::ResourcePtr<EigenTensor> updates,
-                std::vector<int64_t> opts) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = tensor->shape;
+                std::vector<int64_t> axes) {
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = tensor->shape;
 
-  // Copy input tensor first
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
-
-        auto &idx_mat = std::get<FlatArray<int64_t>>(indices->data);
-        auto &upd_mat = std::get<T>(updates->data);
-
-        // Simple case: 1D indices
-        for (size_t i = 0; i < idx_mat.size(); ++i) {
-          int64_t idx = idx_mat[i];
-          if (idx >= 0 && idx < static_cast<int64_t>(dst_mat.size())) {
-            dst_mat[idx] += upd_mat[i];
+    // Extract indices - handle different types
+    std::vector<int64_t> idx_vec;
+    std::visit(
+        [&](auto &idx_arr) {
+          using Scalar = typename std::decay_t<decltype(idx_arr)>::Scalar;
+          if constexpr (std::is_integral_v<Scalar>) {
+            idx_vec.resize(idx_arr.size());
+            for (size_t i = 0; i < idx_arr.size(); ++i) {
+              idx_vec[i] = static_cast<int64_t>(idx_arr[i]);
+            }
+          } else {
+            throw std::runtime_error(
+                "indexed_add: indices must be integer type");
           }
-        }
-      },
-      tensor->data);
+        },
+        indices->data);
 
-  return result;
+    // Infer axes from indices if not provided
+    // indices shape is [..., num_axes] where last dim has coordinates
+    int indices_rank = indices->shape.size();
+    int num_axes = indices->shape[indices_rank - 1];
+    if (axes.empty()) {
+      axes.resize(num_axes);
+      for (int i = 0; i < num_axes; ++i) {
+        axes[i] = i;
+      }
+    }
+
+    size_t num_updates = idx_vec.size() / num_axes;
+    int tensor_rank = tensor->shape.size();
+
+    // Calculate tensor strides
+    std::vector<size_t> tensor_strides(tensor_rank);
+    size_t stride = 1;
+    for (int i = tensor_rank - 1; i >= 0; --i) {
+      tensor_strides[i] = stride;
+      stride *= tensor->shape[i];
+    }
+
+    // Calculate update slice shape (non-indexed dimensions)
+    std::vector<int64_t> update_slice_shape;
+    for (int i = 0; i < tensor_rank; ++i) {
+      bool is_indexed = false;
+      for (int ax : axes) {
+        if (ax == i) {
+          is_indexed = true;
+          break;
+        }
+      }
+      if (!is_indexed) {
+        update_slice_shape.push_back(tensor->shape[i]);
+      }
+    }
+
+    // Calculate update strides
+    size_t update_slice_size = 1;
+    for (auto dim : update_slice_shape) {
+      update_slice_size *= dim;
+    }
+
+    std::visit(
+        [&](auto &src_mat) {
+          using T = typename std::decay_t<decltype(src_mat)>;
+          auto &dst_mat = result->data.emplace<T>();
+          dst_mat = src_mat;
+
+          auto &upd_mat = std::get<T>(updates->data);
+
+          // For each update position
+          for (size_t i = 0; i < num_updates; ++i) {
+            // Get base coordinates from indices
+            std::vector<int64_t> base_coords(tensor_rank, 0);
+            for (int ax = 0; ax < num_axes; ++ax) {
+              int64_t coord = idx_vec[i * num_axes + ax];
+              int tensor_ax = axes[ax];
+
+              // Bounds check
+              if (coord < 0 || coord >= tensor->shape[tensor_ax]) {
+                throw std::runtime_error(
+                    "indexed_add: index " + std::to_string(coord) +
+                    " out of bounds for axis " + std::to_string(tensor_ax) +
+                    " with size " + std::to_string(tensor->shape[tensor_ax]));
+              }
+
+              base_coords[tensor_ax] = coord;
+            }
+
+            // Iterate over the update slice
+            for (size_t slice_idx = 0; slice_idx < update_slice_size;
+                 ++slice_idx) {
+              // Convert slice index to coordinates in non-indexed dimensions
+              std::vector<int64_t> coords = base_coords;
+              size_t temp = slice_idx;
+              int slice_dim = update_slice_shape.size() - 1;
+              for (int dim = tensor_rank - 1; dim >= 0; --dim) {
+                bool is_indexed = false;
+                for (int ax : axes) {
+                  if (ax == dim) {
+                    is_indexed = true;
+                    break;
+                  }
+                }
+                if (!is_indexed) {
+                  coords[dim] = temp % update_slice_shape[slice_dim];
+                  temp /= update_slice_shape[slice_dim];
+                  slice_dim--;
+                }
+              }
+
+              // Calculate linear indices
+              size_t tensor_linear_idx = 0;
+              for (int dim = 0; dim < tensor_rank; ++dim) {
+                tensor_linear_idx += coords[dim] * tensor_strides[dim];
+              }
+
+              size_t update_linear_idx = i * update_slice_size + slice_idx;
+
+              // Bounds check
+              if (tensor_linear_idx >= dst_mat.size() ||
+                  update_linear_idx >= upd_mat.size()) {
+                throw std::runtime_error("indexed_add: index out of bounds");
+              }
+
+              dst_mat[tensor_linear_idx] += upd_mat[update_linear_idx];
+            }
+          }
+        },
+        tensor->data);
+
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("indexed_add_nif error: ") + e.what());
+  }
 }
 FINE_NIF(indexed_add_nif, 0);
 
@@ -1627,324 +1917,147 @@ fine::ResourcePtr<EigenTensor>
 indexed_put_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
                 fine::ResourcePtr<EigenTensor> indices,
                 fine::ResourcePtr<EigenTensor> updates,
-                std::vector<int64_t> opts) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = tensor->shape;
+                std::vector<int64_t> axes) {
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = tensor->shape;
 
-  // Copy input tensor first
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
-
-        auto &idx_mat = std::get<FlatArray<int64_t>>(indices->data);
-        auto &upd_mat = std::get<T>(updates->data);
-
-        // Simple case: 1D indices
-        for (size_t i = 0; i < idx_mat.size(); ++i) {
-          int64_t idx = idx_mat[i];
-          if (idx >= 0 && idx < static_cast<int64_t>(dst_mat.size())) {
-            dst_mat[idx] = upd_mat[i];
+    // Extract indices - handle different types
+    std::vector<int64_t> idx_vec;
+    std::visit(
+        [&](auto &idx_arr) {
+          using Scalar = typename std::decay_t<decltype(idx_arr)>::Scalar;
+          if constexpr (std::is_integral_v<Scalar>) {
+            idx_vec.resize(idx_arr.size());
+            for (size_t i = 0; i < idx_arr.size(); ++i) {
+              idx_vec[i] = static_cast<int64_t>(idx_arr[i]);
+            }
+          } else {
+            throw std::runtime_error(
+                "indexed_put: indices must be integer type");
           }
-        }
-      },
-      tensor->data);
+        },
+        indices->data);
 
-  return result;
+    // Infer axes from indices if not provided
+    // indices shape is [..., num_axes] where last dim has coordinates
+    int indices_rank = indices->shape.size();
+    int num_axes = indices->shape[indices_rank - 1];
+    if (axes.empty()) {
+      axes.resize(num_axes);
+      for (int i = 0; i < num_axes; ++i) {
+        axes[i] = i;
+      }
+    }
+
+    size_t num_updates = idx_vec.size() / num_axes;
+    int tensor_rank = tensor->shape.size();
+
+    // Calculate tensor strides
+    std::vector<size_t> tensor_strides(tensor_rank);
+    size_t stride = 1;
+    for (int i = tensor_rank - 1; i >= 0; --i) {
+      tensor_strides[i] = stride;
+      stride *= tensor->shape[i];
+    }
+
+    // Calculate update slice shape (non-indexed dimensions)
+    std::vector<int64_t> update_slice_shape;
+    for (int i = 0; i < tensor_rank; ++i) {
+      bool is_indexed = false;
+      for (int ax : axes) {
+        if (ax == i) {
+          is_indexed = true;
+          break;
+        }
+      }
+      if (!is_indexed) {
+        update_slice_shape.push_back(tensor->shape[i]);
+      }
+    }
+
+    // Calculate update strides
+    size_t update_slice_size = 1;
+    for (auto dim : update_slice_shape) {
+      update_slice_size *= dim;
+    }
+
+    std::visit(
+        [&](auto &src_mat) {
+          using T = typename std::decay_t<decltype(src_mat)>;
+          auto &dst_mat = result->data.emplace<T>();
+          dst_mat = src_mat;
+
+          auto &upd_mat = std::get<T>(updates->data);
+
+          // For each update position
+          for (size_t i = 0; i < num_updates; ++i) {
+            // Get base coordinates from indices
+            std::vector<int64_t> base_coords(tensor_rank, 0);
+            for (int ax = 0; ax < num_axes; ++ax) {
+              int64_t coord = idx_vec[i * num_axes + ax];
+              int tensor_ax = axes[ax];
+
+              // Bounds check
+              if (coord < 0 || coord >= tensor->shape[tensor_ax]) {
+                throw std::runtime_error(
+                    "indexed_put: index " + std::to_string(coord) +
+                    " out of bounds for axis " + std::to_string(tensor_ax) +
+                    " with size " + std::to_string(tensor->shape[tensor_ax]));
+              }
+
+              base_coords[tensor_ax] = coord;
+            }
+
+            // Iterate over the update slice
+            for (size_t slice_idx = 0; slice_idx < update_slice_size;
+                 ++slice_idx) {
+              // Convert slice index to coordinates in non-indexed dimensions
+              std::vector<int64_t> coords = base_coords;
+              size_t temp = slice_idx;
+              int slice_dim = update_slice_shape.size() - 1;
+              for (int dim = tensor_rank - 1; dim >= 0; --dim) {
+                bool is_indexed = false;
+                for (int ax : axes) {
+                  if (ax == dim) {
+                    is_indexed = true;
+                    break;
+                  }
+                }
+                if (!is_indexed) {
+                  coords[dim] = temp % update_slice_shape[slice_dim];
+                  temp /= update_slice_shape[slice_dim];
+                  slice_dim--;
+                }
+              }
+
+              // Calculate linear indices
+              size_t tensor_linear_idx = 0;
+              for (int dim = 0; dim < tensor_rank; ++dim) {
+                tensor_linear_idx += coords[dim] * tensor_strides[dim];
+              }
+
+              size_t update_linear_idx = i * update_slice_size + slice_idx;
+
+              // Bounds check
+              if (tensor_linear_idx >= dst_mat.size() ||
+                  update_linear_idx >= upd_mat.size()) {
+                throw std::runtime_error("indexed_put: index out of bounds");
+              }
+
+              dst_mat[tensor_linear_idx] = upd_mat[update_linear_idx];
+            }
+          }
+        },
+        tensor->data);
+
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("indexed_put_nif error: ") + e.what());
+  }
 }
 FINE_NIF(indexed_put_nif, 0);
 
-// Window operations - simplified pooling operations
-// Helper macro for window reduction operations
-#define WINDOW_REDUCE_SETUP()                                                  \
-  auto result = fine::make_resource<EigenTensor>();                            \
-  std::vector<int64_t> strides, padding, window_dilations;                     \
-  if (!opts.empty()) {                                                         \
-    if (opts.size() > 0)                                                       \
-      strides = std::vector<int64_t>(opts[0].begin(), opts[0].end());          \
-    if (opts.size() > 1)                                                       \
-      padding = std::vector<int64_t>(opts[1].begin(), opts[1].end());          \
-    if (opts.size() > 2)                                                       \
-      window_dilations = std::vector<int64_t>(opts[2].begin(), opts[2].end()); \
-  }                                                                            \
-  if (strides.empty())                                                         \
-    strides.resize(window_dims.size(), 1);                                     \
-  if (window_dilations.empty())                                                \
-    window_dilations.resize(window_dims.size(), 1);
-
-fine::ResourcePtr<EigenTensor>
-window_sum_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-               std::vector<int64_t> window_dims,
-               std::vector<std::vector<int64_t>> opts) {
-  WINDOW_REDUCE_SETUP();
-
-  // For simplicity, implement basic 1D/2D window sum
-  // Full implementation would handle N-D with padding, strides, dilations
-  result->shape = tensor->shape;
-
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat; // Simplified: just copy for now
-        // TODO: Implement proper sliding window sum
-      },
-      tensor->data);
-
-  return result;
-}
-FINE_NIF(window_sum_nif, 0);
-
-fine::ResourcePtr<EigenTensor>
-window_product_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-                   std::vector<int64_t> window_dims,
-                   std::vector<std::vector<int64_t>> opts) {
-  WINDOW_REDUCE_SETUP();
-  result->shape = tensor->shape;
-
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
-      },
-      tensor->data);
-
-  return result;
-}
-FINE_NIF(window_product_nif, 0);
-
-fine::ResourcePtr<EigenTensor>
-window_max_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-               std::vector<int64_t> window_dims,
-               std::vector<std::vector<int64_t>> opts) {
-  WINDOW_REDUCE_SETUP();
-  result->shape = tensor->shape;
-
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
-      },
-      tensor->data);
-
-  return result;
-}
-FINE_NIF(window_max_nif, 0);
-
-fine::ResourcePtr<EigenTensor>
-window_min_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-               std::vector<int64_t> window_dims,
-               std::vector<std::vector<int64_t>> opts) {
-  WINDOW_REDUCE_SETUP();
-  result->shape = tensor->shape;
-
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
-      },
-      tensor->data);
-
-  return result;
-}
-FINE_NIF(window_min_nif, 0);
-
-fine::ResourcePtr<EigenTensor>
-window_scatter_max_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-                       fine::ResourcePtr<EigenTensor> source, double init_value,
-                       std::vector<int64_t> window_dims,
-                       std::vector<std::vector<int64_t>> opts) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = tensor->shape;
-
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
-      },
-      tensor->data);
-
-  return result;
-}
-FINE_NIF(window_scatter_max_nif, 0);
-
-fine::ResourcePtr<EigenTensor>
-window_scatter_min_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-                       fine::ResourcePtr<EigenTensor> source, double init_value,
-                       std::vector<int64_t> window_dims,
-                       std::vector<std::vector<int64_t>> opts) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = tensor->shape;
-
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
-      },
-      tensor->data);
-
-  return result;
-}
-FINE_NIF(window_scatter_min_nif, 0);
-
-// FFT operations using FFTW (if available)
-fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
-                                       fine::ResourcePtr<EigenTensor> tensor,
-                                       int64_t length, int64_t axis) {
-  auto result = fine::make_resource<EigenTensor>();
-
-  int rank = tensor->shape.size();
-  if (axis < 0)
-    axis = rank + axis;
-
-  // Output is always complex
-  result->shape = tensor->shape;
-  if (length > 0) {
-    result->shape[axis] = length;
-  }
-
-  size_t n = result->shape[axis];
-
-  std::visit(
-      [&](auto &src_mat) {
-        using SrcScalar = typename std::decay_t<decltype(src_mat)>::Scalar;
-
-        // Allocate output as complex
-        auto &out_arr = result->data.emplace<FlatArray<std::complex<double>>>();
-        out_arr.resize(src_mat.size());
-
-        // Simple 1D FFT using FFTW
-        if (rank == 1) {
-          fftw_complex *in = fftw_alloc_complex(n);
-          fftw_complex *out = fftw_alloc_complex(n);
-
-          // Copy input data
-          for (size_t i = 0; i < n && i < src_mat.size(); ++i) {
-            if constexpr (Eigen::NumTraits<SrcScalar>::IsComplex) {
-              in[i][0] = src_mat[i].real();
-              in[i][1] = src_mat[i].imag();
-            } else {
-              in[i][0] = static_cast<double>(src_mat[i]);
-              in[i][1] = 0.0;
-            }
-          }
-
-          // Execute FFT
-          fftw_plan plan =
-              fftw_plan_dft_1d(n, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
-          fftw_execute(plan);
-
-          // Copy output
-          for (size_t i = 0; i < n; ++i) {
-            out_arr[i] = std::complex<double>(out[i][0], out[i][1]);
-          }
-
-          fftw_destroy_plan(plan);
-          fftw_free(in);
-          fftw_free(out);
-        } else {
-          throw std::runtime_error("Multi-dimensional FFT not yet implemented");
-        }
-      },
-      tensor->data);
-
-  return result;
-}
-FINE_NIF(fft_nif, 0);
-
-fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
-                                        fine::ResourcePtr<EigenTensor> tensor,
-                                        int64_t length, int64_t axis) {
-  auto result = fine::make_resource<EigenTensor>();
-
-  int rank = tensor->shape.size();
-  if (axis < 0)
-    axis = rank + axis;
-
-  result->shape = tensor->shape;
-  if (length > 0) {
-    result->shape[axis] = length;
-  }
-
-  size_t n = result->shape[axis];
-
-  std::visit(
-      [&](auto &src_mat) {
-        using SrcScalar = typename std::decay_t<decltype(src_mat)>::Scalar;
-
-        auto &out_arr = result->data.emplace<FlatArray<std::complex<double>>>();
-        out_arr.resize(src_mat.size());
-
-        if (rank == 1) {
-          fftw_complex *in = fftw_alloc_complex(n);
-          fftw_complex *out = fftw_alloc_complex(n);
-
-          // Copy input data
-          for (size_t i = 0; i < n && i < src_mat.size(); ++i) {
-            if constexpr (Eigen::NumTraits<SrcScalar>::IsComplex) {
-              in[i][0] = src_mat[i].real();
-              in[i][1] = src_mat[i].imag();
-            } else {
-              in[i][0] = static_cast<double>(src_mat[i]);
-              in[i][1] = 0.0;
-            }
-          }
-
-          // Execute IFFT
-          fftw_plan plan =
-              fftw_plan_dft_1d(n, in, out, FFTW_BACKWARD, FFTW_ESTIMATE);
-          fftw_execute(plan);
-
-          // Copy output (and normalize)
-          for (size_t i = 0; i < n; ++i) {
-            out_arr[i] = std::complex<double>(out[i][0] / n, out[i][1] / n);
-          }
-
-          fftw_destroy_plan(plan);
-          fftw_free(in);
-          fftw_free(out);
-        } else {
-          throw std::runtime_error(
-              "Multi-dimensional IFFT not yet implemented");
-        }
-      },
-      tensor->data);
-
-  return result;
-}
-FINE_NIF(ifft_nif, 0);
-
-// Convolution - basic implementation
-fine::ResourcePtr<EigenTensor>
-conv_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-         fine::ResourcePtr<EigenTensor> kernel,
-         std::vector<std::vector<int64_t>> opts) {
-  auto result = fine::make_resource<EigenTensor>();
-
-  // Simplified: just return input for now
-  // Full implementation would require proper convolution with strides, padding,
-  // etc.
-  result->shape = tensor->shape;
-
-  std::visit(
-      [&](auto &src_mat) {
-        using T = typename std::decay_t<decltype(src_mat)>;
-        auto &dst_mat = result->data.emplace<T>();
-        dst_mat = src_mat;
-      },
-      tensor->data);
-
-  return result;
-}
-FINE_NIF(conv_nif, 0);
-
-// Constant/Eye/Iota
 // Helper to decode constant value (either number or {real, imag} tuple for
 // complex)
 struct ConstantValue {
@@ -1986,15 +2099,1389 @@ template <> struct Decoder<ConstantValue> {
       return ConstantValue(static_cast<double>(ival));
     }
 
-    throw std::runtime_error(
-        "ConstantValue must be a number or {real, imag} tuple");
+    // Try as atom (for infinity/nan)
+    char atom_buf[256];
+    if (enif_get_atom(env, term, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
+      std::string atom(atom_buf);
+      if (atom == "infinity")
+        return ConstantValue(std::numeric_limits<double>::infinity());
+      if (atom == "neg_infinity")
+        return ConstantValue(-std::numeric_limits<double>::infinity());
+      if (atom == "nan")
+        return ConstantValue(std::numeric_limits<double>::quiet_NaN());
+    }
+
+    throw std::runtime_error("Failed to decode ConstantValue");
   }
 };
 } // namespace fine
 
-fine::ResourcePtr<EigenTensor> constant_nif(ErlNifEnv *env, ScalarType type,
-                                            std::vector<int64_t> shape,
-                                            ConstantValue value) {
+// Window operations - sliding window reductions
+// Helper to compute output shape for window operations
+inline std::vector<int64_t>
+compute_window_output_shape(const std::vector<int64_t> &input_shape,
+                            const std::vector<int64_t> &window_dims,
+                            const std::vector<int64_t> &strides,
+                            const std::vector<int64_t> &padding_flat,
+                            const std::vector<int64_t> &window_dilations) {
+
+  int rank = input_shape.size();
+  std::vector<int64_t> output_shape(rank);
+
+  for (int i = 0; i < rank; ++i) {
+    // padding_flat is [low0, high0, low1, high1, ...]
+    int64_t pad_low = (padding_flat.size() > i * 2) ? padding_flat[i * 2] : 0;
+    int64_t pad_high =
+        (padding_flat.size() > i * 2 + 1) ? padding_flat[i * 2 + 1] : 0;
+    int64_t padded_size = input_shape[i] + pad_low + pad_high;
+
+    // Effective window size with dilation
+    int64_t dilated_window = (window_dims[i] - 1) * window_dilations[i] + 1;
+
+    // Output size: (padded_size - dilated_window) / stride + 1
+    output_shape[i] = (padded_size - dilated_window) / strides[i] + 1;
+  }
+
+  return output_shape;
+}
+
+// Helper macro for window reduction operations
+#define WINDOW_REDUCE_SETUP()                                                  \
+  auto result = fine::make_resource<EigenTensor>();                            \
+  std::vector<int64_t> strides, padding_flat, window_dilations;                \
+  if (!opts.empty()) {                                                         \
+    if (opts.size() > 0)                                                       \
+      strides = std::vector<int64_t>(opts[0].begin(), opts[0].end());          \
+    if (opts.size() > 1)                                                       \
+      padding_flat = std::vector<int64_t>(opts[1].begin(), opts[1].end());     \
+    if (opts.size() > 2)                                                       \
+      window_dilations = std::vector<int64_t>(opts[2].begin(), opts[2].end()); \
+  }                                                                            \
+  if (strides.empty())                                                         \
+    strides.resize(window_dims.size(), 1);                                     \
+  if (window_dilations.empty())                                                \
+    window_dilations.resize(window_dims.size(), 1);                            \
+  result->shape = compute_window_output_shape(                                 \
+      tensor->shape, window_dims, strides, padding_flat, window_dilations);
+
+fine::ResourcePtr<EigenTensor>
+window_sum_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+               std::vector<int64_t> window_dims,
+               std::vector<std::vector<int64_t>> opts) {
+  WINDOW_REDUCE_SETUP();
+
+  int rank = tensor->shape.size();
+
+  // Compute input strides
+  std::vector<size_t> input_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    input_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+
+  // Compute output strides
+  std::vector<size_t> output_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    output_strides[i] = stride;
+    stride *= result->shape[i];
+  }
+
+  size_t output_size = stride;
+
+  std::visit(
+      [&](auto &src_mat) {
+        using T = typename std::decay_t<decltype(src_mat)>;
+        using Scalar = typename T::Scalar;
+        auto &dst_mat = result->data.emplace<T>();
+        dst_mat.resize(output_size);
+        dst_mat.setZero();
+
+        // For each output position
+        for (size_t out_idx = 0; out_idx < output_size; ++out_idx) {
+          // Compute output coordinates from linear index
+          std::vector<int64_t> out_coords(rank);
+          size_t temp = out_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            out_coords[d] = temp % result->shape[d];
+            temp /= result->shape[d];
+          }
+
+          Scalar sum = 0;
+
+          // Iterate over the window
+          std::vector<int64_t> window_coords(rank, 0);
+          std::function<void(int)> iterate_window = [&](int dim) {
+            if (dim == rank) {
+              // Compute input coordinate for this window position
+              std::vector<int64_t> in_coords(rank);
+              bool valid = true;
+
+              for (int d = 0; d < rank; ++d) {
+                int64_t pad_low =
+                    (padding_flat.size() > d * 2) ? padding_flat[d * 2] : 0;
+                int64_t in_coord = out_coords[d] * strides[d] +
+                                   window_coords[d] * window_dilations[d] -
+                                   pad_low;
+
+                if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                  valid = false;
+                  break;
+                }
+                in_coords[d] = in_coord;
+              }
+
+              if (valid) {
+                // Compute linear index in input
+                size_t in_idx = 0;
+                for (int d = 0; d < rank; ++d) {
+                  in_idx += in_coords[d] * input_strides[d];
+                }
+                sum += src_mat[in_idx];
+              }
+              return;
+            }
+
+            for (int64_t w = 0; w < window_dims[dim]; ++w) {
+              window_coords[dim] = w;
+              iterate_window(dim + 1);
+            }
+          };
+
+          iterate_window(0);
+          dst_mat[out_idx] = sum;
+        }
+      },
+      tensor->data);
+
+  return result;
+}
+FINE_NIF(window_sum_nif, 0);
+
+fine::ResourcePtr<EigenTensor>
+window_product_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+                   std::vector<int64_t> window_dims,
+                   std::vector<std::vector<int64_t>> opts) {
+  WINDOW_REDUCE_SETUP();
+
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> input_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    input_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+
+  std::vector<size_t> output_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    output_strides[i] = stride;
+    stride *= result->shape[i];
+  }
+
+  size_t output_size = stride;
+
+  std::visit(
+      [&](auto &src_mat) {
+        using T = typename std::decay_t<decltype(src_mat)>;
+        using Scalar = typename T::Scalar;
+        auto &dst_mat = result->data.emplace<T>();
+        dst_mat.resize(output_size);
+
+        for (size_t out_idx = 0; out_idx < output_size; ++out_idx) {
+          std::vector<int64_t> out_coords(rank);
+          size_t temp = out_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            out_coords[d] = temp % result->shape[d];
+            temp /= result->shape[d];
+          }
+
+          Scalar product = 1;
+
+          std::vector<int64_t> window_coords(rank, 0);
+          std::function<void(int)> iterate_window = [&](int dim) {
+            if (dim == rank) {
+              std::vector<int64_t> in_coords(rank);
+              bool valid = true;
+
+              for (int d = 0; d < rank; ++d) {
+                int64_t pad_low =
+                    (padding_flat.size() > d * 2) ? padding_flat[d * 2] : 0;
+                int64_t in_coord = out_coords[d] * strides[d] +
+                                   window_coords[d] * window_dilations[d] -
+                                   pad_low;
+
+                if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                  valid = false;
+                  break;
+                }
+                in_coords[d] = in_coord;
+              }
+
+              if (valid) {
+                size_t in_idx = 0;
+                for (int d = 0; d < rank; ++d) {
+                  in_idx += in_coords[d] * input_strides[d];
+                }
+                product *= src_mat[in_idx];
+              }
+              return;
+            }
+
+            for (int64_t w = 0; w < window_dims[dim]; ++w) {
+              window_coords[dim] = w;
+              iterate_window(dim + 1);
+            }
+          };
+
+          iterate_window(0);
+          dst_mat[out_idx] = product;
+        }
+      },
+      tensor->data);
+
+  return result;
+}
+FINE_NIF(window_product_nif, 0);
+
+fine::ResourcePtr<EigenTensor>
+window_max_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+               std::vector<int64_t> window_dims,
+               std::vector<std::vector<int64_t>> opts) {
+  WINDOW_REDUCE_SETUP();
+
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> input_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    input_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+
+  std::vector<size_t> output_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    output_strides[i] = stride;
+    stride *= result->shape[i];
+  }
+
+  size_t output_size = stride;
+
+  std::visit(
+      [&](auto &src_mat) {
+        using T = typename std::decay_t<decltype(src_mat)>;
+        using Scalar = typename T::Scalar;
+        auto &dst_mat = result->data.emplace<T>();
+        dst_mat.resize(output_size);
+
+        for (size_t out_idx = 0; out_idx < output_size; ++out_idx) {
+          std::vector<int64_t> out_coords(rank);
+          size_t temp = out_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            out_coords[d] = temp % result->shape[d];
+            temp /= result->shape[d];
+          }
+
+          Scalar max_val;
+          bool found_any = false;
+
+          std::vector<int64_t> window_coords(rank, 0);
+          std::function<void(int)> iterate_window = [&](int dim) {
+            if (dim == rank) {
+              std::vector<int64_t> in_coords(rank);
+              bool valid = true;
+
+              for (int d = 0; d < rank; ++d) {
+                int64_t pad_low =
+                    (padding_flat.size() > d * 2) ? padding_flat[d * 2] : 0;
+                int64_t in_coord = out_coords[d] * strides[d] +
+                                   window_coords[d] * window_dilations[d] -
+                                   pad_low;
+
+                if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                  valid = false;
+                  break;
+                }
+                in_coords[d] = in_coord;
+              }
+
+              if (valid) {
+                size_t in_idx = 0;
+                for (int d = 0; d < rank; ++d) {
+                  in_idx += in_coords[d] * input_strides[d];
+                }
+                if constexpr (std::is_same_v<Scalar, std::complex<float>> ||
+                              std::is_same_v<Scalar, std::complex<double>>) {
+                  // For complex, use magnitude comparison
+                  if (!found_any ||
+                      std::abs(src_mat[in_idx]) > std::abs(max_val)) {
+                    max_val = src_mat[in_idx];
+                    found_any = true;
+                  }
+                } else {
+                  if (!found_any || src_mat[in_idx] > max_val) {
+                    max_val = src_mat[in_idx];
+                    found_any = true;
+                  }
+                }
+              }
+              return;
+            }
+
+            for (int64_t w = 0; w < window_dims[dim]; ++w) {
+              window_coords[dim] = w;
+              iterate_window(dim + 1);
+            }
+          };
+
+          iterate_window(0);
+          if (found_any) {
+            dst_mat[out_idx] = max_val;
+          } else {
+            // No valid elements in window - use type's min value
+            if constexpr (std::is_integral_v<Scalar>) {
+              dst_mat[out_idx] = std::numeric_limits<Scalar>::lowest();
+            } else if constexpr (std::is_floating_point_v<Scalar>) {
+              dst_mat[out_idx] = -std::numeric_limits<Scalar>::infinity();
+            } else {
+              dst_mat[out_idx] = Scalar(0);
+            }
+          }
+        }
+      },
+      tensor->data);
+
+  return result;
+}
+FINE_NIF(window_max_nif, 0);
+
+fine::ResourcePtr<EigenTensor>
+window_min_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+               std::vector<int64_t> window_dims,
+               std::vector<std::vector<int64_t>> opts) {
+  WINDOW_REDUCE_SETUP();
+
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> input_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    input_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+
+  std::vector<size_t> output_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    output_strides[i] = stride;
+    stride *= result->shape[i];
+  }
+
+  size_t output_size = stride;
+
+  std::visit(
+      [&](auto &src_mat) {
+        using T = typename std::decay_t<decltype(src_mat)>;
+        using Scalar = typename T::Scalar;
+        auto &dst_mat = result->data.emplace<T>();
+        dst_mat.resize(output_size);
+
+        for (size_t out_idx = 0; out_idx < output_size; ++out_idx) {
+          std::vector<int64_t> out_coords(rank);
+          size_t temp = out_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            out_coords[d] = temp % result->shape[d];
+            temp /= result->shape[d];
+          }
+
+          Scalar min_val;
+          bool found_any = false;
+
+          std::vector<int64_t> window_coords(rank, 0);
+          std::function<void(int)> iterate_window = [&](int dim) {
+            if (dim == rank) {
+              std::vector<int64_t> in_coords(rank);
+              bool valid = true;
+
+              for (int d = 0; d < rank; ++d) {
+                int64_t pad_low =
+                    (padding_flat.size() > d * 2) ? padding_flat[d * 2] : 0;
+                int64_t in_coord = out_coords[d] * strides[d] +
+                                   window_coords[d] * window_dilations[d] -
+                                   pad_low;
+
+                if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                  valid = false;
+                  break;
+                }
+                in_coords[d] = in_coord;
+              }
+
+              if (valid) {
+                size_t in_idx = 0;
+                for (int d = 0; d < rank; ++d) {
+                  in_idx += in_coords[d] * input_strides[d];
+                }
+                if constexpr (std::is_same_v<Scalar, std::complex<float>> ||
+                              std::is_same_v<Scalar, std::complex<double>>) {
+                  // For complex, use magnitude comparison
+                  if (!found_any ||
+                      std::abs(src_mat[in_idx]) < std::abs(min_val)) {
+                    min_val = src_mat[in_idx];
+                    found_any = true;
+                  }
+                } else {
+                  if (!found_any || src_mat[in_idx] < min_val) {
+                    min_val = src_mat[in_idx];
+                    found_any = true;
+                  }
+                }
+              }
+              return;
+            }
+
+            for (int64_t w = 0; w < window_dims[dim]; ++w) {
+              window_coords[dim] = w;
+              iterate_window(dim + 1);
+            }
+          };
+
+          iterate_window(0);
+          if (found_any) {
+            dst_mat[out_idx] = min_val;
+          } else {
+            // No valid elements in window - use type's max value
+            if constexpr (std::is_integral_v<Scalar>) {
+              dst_mat[out_idx] = std::numeric_limits<Scalar>::max();
+            } else if constexpr (std::is_floating_point_v<Scalar>) {
+              dst_mat[out_idx] = std::numeric_limits<Scalar>::infinity();
+            } else {
+              dst_mat[out_idx] = Scalar(0);
+            }
+          }
+        }
+      },
+      tensor->data);
+
+  return result;
+}
+FINE_NIF(window_min_nif, 0);
+
+fine::ResourcePtr<EigenTensor> window_scatter_max_nif(
+    ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+    fine::ResourcePtr<EigenTensor> source, ConstantValue init_value,
+    std::vector<int64_t> window_dims, std::vector<std::vector<int64_t>> opts) {
+  auto result = fine::make_resource<EigenTensor>();
+
+  std::vector<int64_t> strides, padding_flat, window_dilations;
+  if (!opts.empty()) {
+    if (opts.size() > 0)
+      strides = std::vector<int64_t>(opts[0].begin(), opts[0].end());
+    if (opts.size() > 1)
+      padding_flat = std::vector<int64_t>(opts[1].begin(), opts[1].end());
+    if (opts.size() > 2)
+      window_dilations = std::vector<int64_t>(opts[2].begin(), opts[2].end());
+  }
+  if (strides.empty())
+    strides.resize(window_dims.size(), 1);
+  if (window_dilations.empty())
+    window_dilations.resize(window_dims.size(), 1);
+
+  // Output shape is same as tensor shape
+  result->shape = tensor->shape;
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> tensor_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    tensor_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+  size_t tensor_size = stride;
+
+  std::vector<size_t> source_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    source_strides[i] = stride;
+    stride *= source->shape[i];
+  }
+  size_t source_size = stride;
+
+  std::visit(
+      [&](auto &tensor_mat) {
+        using T = typename std::decay_t<decltype(tensor_mat)>;
+        using Scalar = typename T::Scalar;
+        auto &dst_mat = result->data.emplace<T>();
+        dst_mat.resize(tensor_size);
+
+        // Initialize with init_value
+        for (size_t i = 0; i < tensor_size; ++i) {
+          if constexpr (std::is_same_v<Scalar, std::complex<float>>) {
+            dst_mat[i] = std::complex<float>(init_value.real, init_value.imag);
+          } else if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+            dst_mat[i] = std::complex<double>(init_value.real, init_value.imag);
+          } else {
+            dst_mat[i] = static_cast<Scalar>(init_value.real);
+          }
+        }
+
+        // For each position in source tensor, find the max in the corresponding
+        // window and scatter the source value to that position
+        std::visit(
+            [&](auto &source_mat) {
+              using SourceScalar =
+                  typename std::decay_t<decltype(source_mat)>::Scalar;
+
+              // Only process if types match
+              if constexpr (std::is_same_v<Scalar, SourceScalar>) {
+                for (size_t src_idx = 0; src_idx < source_size; ++src_idx) {
+                  // Compute source coordinates (corresponds to a window)
+                  std::vector<int64_t> src_coords(rank);
+                  size_t temp = src_idx;
+                  for (int d = rank - 1; d >= 0; --d) {
+                    src_coords[d] = temp % source->shape[d];
+                    temp /= source->shape[d];
+                  }
+
+                  // Find the maximum value and its position in this window
+                  Scalar max_val;
+                  std::vector<int64_t> max_pos(rank);
+                  bool found_any = false;
+
+                  std::vector<int64_t> window_coords(rank, 0);
+                  std::function<void(int)> iterate_window = [&](int dim) {
+                    if (dim == rank) {
+                      // Compute input coordinate for this window position
+                      std::vector<int64_t> in_coords(rank);
+                      bool valid = true;
+
+                      for (int d = 0; d < rank; ++d) {
+                        int64_t pad_low = (padding_flat.size() > d * 2)
+                                              ? padding_flat[d * 2]
+                                              : 0;
+                        int64_t in_coord =
+                            src_coords[d] * strides[d] +
+                            window_coords[d] * window_dilations[d] - pad_low;
+
+                        if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                          valid = false;
+                          break;
+                        }
+                        in_coords[d] = in_coord;
+                      }
+
+                      if (valid) {
+                        size_t in_idx = 0;
+                        for (int d = 0; d < rank; ++d) {
+                          in_idx += in_coords[d] * tensor_strides[d];
+                        }
+
+                        if constexpr (std::is_same_v<Scalar,
+                                                     std::complex<float>> ||
+                                      std::is_same_v<Scalar,
+                                                     std::complex<double>>) {
+                          if (!found_any || std::abs(tensor_mat[in_idx]) >=
+                                                std::abs(max_val)) {
+                            max_val = tensor_mat[in_idx];
+                            max_pos = in_coords;
+                            found_any = true;
+                          }
+                        } else {
+                          if (!found_any || tensor_mat[in_idx] >= max_val) {
+                            max_val = tensor_mat[in_idx];
+                            max_pos = in_coords;
+                            found_any = true;
+                          }
+                        }
+                      }
+                      return;
+                    }
+
+                    for (int64_t w = 0; w < window_dims[dim]; ++w) {
+                      window_coords[dim] = w;
+                      iterate_window(dim + 1);
+                    }
+                  };
+
+                  iterate_window(0);
+
+                  // Scatter source value to the max position (add if
+                  // overlapping)
+                  if (found_any) {
+                    size_t out_idx = 0;
+                    for (int d = 0; d < rank; ++d) {
+                      out_idx += max_pos[d] * tensor_strides[d];
+                    }
+                    dst_mat[out_idx] += source_mat[src_idx];
+                  }
+                }
+              }
+            },
+            source->data);
+      },
+      tensor->data);
+
+  return result;
+}
+FINE_NIF(window_scatter_max_nif, 0);
+
+fine::ResourcePtr<EigenTensor> window_scatter_min_nif(
+    ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
+    fine::ResourcePtr<EigenTensor> source, ConstantValue init_value,
+    std::vector<int64_t> window_dims, std::vector<std::vector<int64_t>> opts) {
+  auto result = fine::make_resource<EigenTensor>();
+
+  std::vector<int64_t> strides, padding_flat, window_dilations;
+  if (!opts.empty()) {
+    if (opts.size() > 0)
+      strides = std::vector<int64_t>(opts[0].begin(), opts[0].end());
+    if (opts.size() > 1)
+      padding_flat = std::vector<int64_t>(opts[1].begin(), opts[1].end());
+    if (opts.size() > 2)
+      window_dilations = std::vector<int64_t>(opts[2].begin(), opts[2].end());
+  }
+  if (strides.empty())
+    strides.resize(window_dims.size(), 1);
+  if (window_dilations.empty())
+    window_dilations.resize(window_dims.size(), 1);
+
+  result->shape = tensor->shape;
+  int rank = tensor->shape.size();
+
+  std::vector<size_t> tensor_strides(rank);
+  size_t stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    tensor_strides[i] = stride;
+    stride *= tensor->shape[i];
+  }
+  size_t tensor_size = stride;
+
+  std::vector<size_t> source_strides(rank);
+  stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    source_strides[i] = stride;
+    stride *= source->shape[i];
+  }
+  size_t source_size = stride;
+
+  std::visit(
+      [&](auto &tensor_mat) {
+        using T = typename std::decay_t<decltype(tensor_mat)>;
+        using Scalar = typename T::Scalar;
+        auto &dst_mat = result->data.emplace<T>();
+        dst_mat.resize(tensor_size);
+
+        // Initialize with init_value
+        for (size_t i = 0; i < tensor_size; ++i) {
+          if constexpr (std::is_same_v<Scalar, std::complex<float>>) {
+            dst_mat[i] = std::complex<float>(init_value.real, init_value.imag);
+          } else if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+            dst_mat[i] = std::complex<double>(init_value.real, init_value.imag);
+          } else {
+            dst_mat[i] = static_cast<Scalar>(init_value.real);
+          }
+        }
+
+        // For each position in source, scatter to corresponding window in
+        // output Assume source and tensor have the same type
+        std::visit(
+            [&](auto &source_mat) {
+              using SourceScalar =
+                  typename std::decay_t<decltype(source_mat)>::Scalar;
+
+              // Only process if types match
+              if constexpr (std::is_same_v<Scalar, SourceScalar>) {
+                for (size_t src_idx = 0; src_idx < source_size; ++src_idx) {
+                  // Compute source coordinates (corresponds to a window)
+                  std::vector<int64_t> src_coords(rank);
+                  size_t temp = src_idx;
+                  for (int d = rank - 1; d >= 0; --d) {
+                    src_coords[d] = temp % source->shape[d];
+                    temp /= source->shape[d];
+                  }
+
+                  // Find the minimum value and its position in this window
+                  Scalar min_val;
+                  std::vector<int64_t> min_pos(rank);
+                  bool found_any = false;
+
+                  std::vector<int64_t> window_coords(rank, 0);
+                  std::function<void(int)> iterate_window = [&](int dim) {
+                    if (dim == rank) {
+                      // Compute input coordinate for this window position
+                      std::vector<int64_t> in_coords(rank);
+                      bool valid = true;
+
+                      for (int d = 0; d < rank; ++d) {
+                        int64_t pad_low = (padding_flat.size() > d * 2)
+                                              ? padding_flat[d * 2]
+                                              : 0;
+                        int64_t in_coord =
+                            src_coords[d] * strides[d] +
+                            window_coords[d] * window_dilations[d] - pad_low;
+
+                        if (in_coord < 0 || in_coord >= tensor->shape[d]) {
+                          valid = false;
+                          break;
+                        }
+                        in_coords[d] = in_coord;
+                      }
+
+                      if (valid) {
+                        size_t in_idx = 0;
+                        for (int d = 0; d < rank; ++d) {
+                          in_idx += in_coords[d] * tensor_strides[d];
+                        }
+
+                        if constexpr (std::is_same_v<Scalar,
+                                                     std::complex<float>> ||
+                                      std::is_same_v<Scalar,
+                                                     std::complex<double>>) {
+                          if (!found_any || std::abs(tensor_mat[in_idx]) <=
+                                                std::abs(min_val)) {
+                            min_val = tensor_mat[in_idx];
+                            min_pos = in_coords;
+                            found_any = true;
+                          }
+                        } else {
+                          if (!found_any || tensor_mat[in_idx] <= min_val) {
+                            min_val = tensor_mat[in_idx];
+                            min_pos = in_coords;
+                            found_any = true;
+                          }
+                        }
+                      }
+                      return;
+                    }
+
+                    for (int64_t w = 0; w < window_dims[dim]; ++w) {
+                      window_coords[dim] = w;
+                      iterate_window(dim + 1);
+                    }
+                  };
+
+                  iterate_window(0);
+
+                  // Scatter source value to the min position (add if
+                  // overlapping)
+                  if (found_any) {
+                    size_t out_idx = 0;
+                    for (int d = 0; d < rank; ++d) {
+                      out_idx += min_pos[d] * tensor_strides[d];
+                    }
+                    dst_mat[out_idx] += source_mat[src_idx];
+                  }
+                }
+              }
+            },
+            source->data);
+      },
+      tensor->data);
+
+  return result;
+}
+FINE_NIF(window_scatter_min_nif, 0);
+
+// FFT operations using FFTW (if available)
+fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
+                                       fine::ResourcePtr<EigenTensor> tensor,
+                                       int64_t length, int64_t axis) {
+  auto result = fine::make_resource<EigenTensor>();
+
+  int rank = tensor->shape.size();
+  if (axis < 0)
+    axis = rank + axis;
+
+  // Output is always complex
+  result->shape = tensor->shape;
+  if (length > 0) {
+    result->shape[axis] = length;
+  }
+
+  size_t n = result->shape[axis];
+
+  std::visit(
+      [&](auto &src_mat) {
+        using SrcScalar = typename std::decay_t<decltype(src_mat)>::Scalar;
+
+        // Calculate output size
+        size_t out_size = 1;
+        for (auto dim : result->shape) {
+          out_size *= dim;
+        }
+
+        // Allocate output as complex float (c64)
+        auto &out_arr = result->data.emplace<FlatArray<std::complex<float>>>();
+        out_arr.resize(out_size);
+
+        // Compute strides for both input and output
+        std::vector<size_t> in_strides(rank);
+        std::vector<size_t> out_strides(rank);
+        in_strides[rank - 1] = 1;
+        out_strides[rank - 1] = 1;
+        for (int i = rank - 2; i >= 0; --i) {
+          in_strides[i] = in_strides[i + 1] * tensor->shape[i + 1];
+          out_strides[i] = out_strides[i + 1] * result->shape[i + 1];
+        }
+
+        // Calculate number of FFTs to perform
+        size_t num_ffts = out_size / n;
+
+        // Allocate FFTW buffers
+        fftw_complex *in = fftw_alloc_complex(n);
+        fftw_complex *out = fftw_alloc_complex(n);
+        fftw_plan plan =
+            fftw_plan_dft_1d(n, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+
+        // Perform FFT along the specified axis for each "row"
+        for (size_t fft_idx = 0; fft_idx < num_ffts; ++fft_idx) {
+          // Compute coordinates in the non-axis dimensions
+          std::vector<size_t> coords(rank, 0);
+          size_t remaining = fft_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            if (d != axis) {
+              coords[d] = remaining % result->shape[d];
+              remaining /= result->shape[d];
+            }
+          }
+
+          // Compute base indices for input and output
+          size_t src_base = 0;
+          size_t dst_base = 0;
+          for (int d = 0; d < rank; ++d) {
+            if (d != axis) {
+              src_base += coords[d] * in_strides[d];
+              dst_base += coords[d] * out_strides[d];
+            }
+          }
+
+          // Zero-initialize input buffer
+          for (size_t i = 0; i < n; ++i) {
+            in[i][0] = 0.0;
+            in[i][1] = 0.0;
+          }
+
+          // Copy input data along the axis
+          size_t src_len = tensor->shape[axis];
+          for (size_t i = 0; i < n && i < src_len; ++i) {
+            size_t src_idx = src_base + i * in_strides[axis];
+            if (src_idx < src_mat.size()) {
+              if constexpr (Eigen::NumTraits<SrcScalar>::IsComplex) {
+                in[i][0] = src_mat[src_idx].real();
+                in[i][1] = src_mat[src_idx].imag();
+              } else {
+                in[i][0] = static_cast<double>(src_mat[src_idx]);
+                in[i][1] = 0.0;
+              }
+            }
+          }
+
+          // Execute FFT
+          fftw_execute(plan);
+
+          // Copy output
+          for (size_t i = 0; i < n; ++i) {
+            size_t dst_idx = dst_base + i * out_strides[axis];
+            out_arr[dst_idx] = std::complex<float>(out[i][0], out[i][1]);
+          }
+        }
+
+        fftw_destroy_plan(plan);
+        fftw_free(in);
+        fftw_free(out);
+      },
+      tensor->data);
+
+  return result;
+}
+FINE_NIF(fft_nif, 0);
+
+fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
+                                        fine::ResourcePtr<EigenTensor> tensor,
+                                        int64_t length, int64_t axis) {
+  auto result = fine::make_resource<EigenTensor>();
+
+  int rank = tensor->shape.size();
+  if (axis < 0)
+    axis = rank + axis;
+
+  result->shape = tensor->shape;
+  if (length > 0) {
+    result->shape[axis] = length;
+  }
+
+  size_t n = result->shape[axis];
+
+  std::visit(
+      [&](auto &src_mat) {
+        using SrcScalar = typename std::decay_t<decltype(src_mat)>::Scalar;
+
+        // Calculate output size
+        size_t out_size = 1;
+        for (auto dim : result->shape) {
+          out_size *= dim;
+        }
+
+        // Allocate output as complex float (c64)
+        auto &out_arr = result->data.emplace<FlatArray<std::complex<float>>>();
+        out_arr.resize(out_size);
+
+        // Compute strides for both input and output
+        std::vector<size_t> in_strides(rank);
+        std::vector<size_t> out_strides(rank);
+        in_strides[rank - 1] = 1;
+        out_strides[rank - 1] = 1;
+        for (int i = rank - 2; i >= 0; --i) {
+          in_strides[i] = in_strides[i + 1] * tensor->shape[i + 1];
+          out_strides[i] = out_strides[i + 1] * result->shape[i + 1];
+        }
+
+        // Calculate number of IFFTs to perform
+        size_t num_ffts = out_size / n;
+
+        // Allocate FFTW buffers
+        fftw_complex *in = fftw_alloc_complex(n);
+        fftw_complex *out = fftw_alloc_complex(n);
+        fftw_plan plan =
+            fftw_plan_dft_1d(n, in, out, FFTW_BACKWARD, FFTW_ESTIMATE);
+
+        // Perform IFFT along the specified axis for each "row"
+        for (size_t fft_idx = 0; fft_idx < num_ffts; ++fft_idx) {
+          // Compute coordinates in the non-axis dimensions
+          std::vector<size_t> coords(rank, 0);
+          size_t remaining = fft_idx;
+          for (int d = rank - 1; d >= 0; --d) {
+            if (d != axis) {
+              coords[d] = remaining % result->shape[d];
+              remaining /= result->shape[d];
+            }
+          }
+
+          // Compute base indices for input and output
+          size_t src_base = 0;
+          size_t dst_base = 0;
+          for (int d = 0; d < rank; ++d) {
+            if (d != axis) {
+              src_base += coords[d] * in_strides[d];
+              dst_base += coords[d] * out_strides[d];
+            }
+          }
+
+          // Zero-initialize input buffer
+          for (size_t i = 0; i < n; ++i) {
+            in[i][0] = 0.0;
+            in[i][1] = 0.0;
+          }
+
+          // Copy input data along the axis
+          size_t src_len = tensor->shape[axis];
+          for (size_t i = 0; i < n && i < src_len; ++i) {
+            size_t src_idx = src_base + i * in_strides[axis];
+            if (src_idx < src_mat.size()) {
+              if constexpr (Eigen::NumTraits<SrcScalar>::IsComplex) {
+                in[i][0] = src_mat[src_idx].real();
+                in[i][1] = src_mat[src_idx].imag();
+              } else {
+                in[i][0] = static_cast<double>(src_mat[src_idx]);
+                in[i][1] = 0.0;
+              }
+            }
+          }
+
+          // Execute IFFT
+          fftw_execute(plan);
+
+          // Copy output (and normalize)
+          for (size_t i = 0; i < n; ++i) {
+            size_t dst_idx = dst_base + i * out_strides[axis];
+            out_arr[dst_idx] =
+                std::complex<float>(out[i][0] / n, out[i][1] / n);
+          }
+        }
+
+        fftw_destroy_plan(plan);
+        fftw_free(in);
+        fftw_free(out);
+      },
+      tensor->data);
+
+  return result;
+}
+FINE_NIF(ifft_nif, 0);
+
+// Helper function to parse convolution options
+struct ConvOptions {
+  std::vector<int64_t> strides;
+  std::vector<std::pair<int64_t, int64_t>> padding;
+  std::vector<int64_t> input_dilation;
+  std::vector<int64_t> kernel_dilation;
+  int64_t feature_group_size;
+  int64_t batch_group_size;
+  std::vector<int64_t> input_permutation;
+  std::vector<int64_t> kernel_permutation;
+  std::vector<int64_t> output_permutation;
+};
+
+static ConvOptions parse_conv_options(ErlNifEnv *env, ERL_NIF_TERM opts_term) {
+  ConvOptions opts;
+
+  // Helper to get a key from keyword list
+  auto get_keyword = [env, opts_term](const char *key) -> ERL_NIF_TERM {
+    ERL_NIF_TERM value;
+    ERL_NIF_TERM atom = enif_make_atom(env, key);
+    if (enif_get_map_value(env, opts_term, atom, &value)) {
+      return value;
+    }
+    // Try as list (keyword list)
+    ERL_NIF_TERM list = opts_term;
+    ERL_NIF_TERM head, tail;
+    while (enif_get_list_cell(env, list, &head, &tail)) {
+      const ERL_NIF_TERM *tuple;
+      int arity;
+      if (enif_get_tuple(env, head, &arity, &tuple) && arity == 2) {
+        char atom_buf[256];
+        if (enif_get_atom(env, tuple[0], atom_buf, sizeof(atom_buf),
+                          ERL_NIF_LATIN1)) {
+          if (strcmp(atom_buf, key) == 0) {
+            return tuple[1];
+          }
+        }
+      }
+      list = tail;
+    }
+    return 0;
+  };
+
+  // Helper to parse list of integers
+  auto parse_int_list = [env](ERL_NIF_TERM term) -> std::vector<int64_t> {
+    std::vector<int64_t> result;
+    ERL_NIF_TERM list = term;
+    ERL_NIF_TERM head, tail;
+    while (enif_get_list_cell(env, list, &head, &tail)) {
+      long val;
+      if (enif_get_long(env, head, &val)) {
+        result.push_back(static_cast<int64_t>(val));
+      }
+      list = tail;
+    }
+    return result;
+  };
+
+  // Helper to parse list of tuples (for padding)
+  auto parse_padding_list =
+      [env](ERL_NIF_TERM term) -> std::vector<std::pair<int64_t, int64_t>> {
+    std::vector<std::pair<int64_t, int64_t>> result;
+    ERL_NIF_TERM list = term;
+    ERL_NIF_TERM head, tail;
+    while (enif_get_list_cell(env, list, &head, &tail)) {
+      const ERL_NIF_TERM *tuple;
+      int arity;
+      if (enif_get_tuple(env, head, &arity, &tuple) && arity == 2) {
+        long left, right;
+        if (enif_get_long(env, tuple[0], &left) &&
+            enif_get_long(env, tuple[1], &right)) {
+          result.push_back(
+              {static_cast<int64_t>(left), static_cast<int64_t>(right)});
+        }
+      }
+      list = tail;
+    }
+    return result;
+  };
+
+  // Parse each option
+  ERL_NIF_TERM term;
+
+  if ((term = get_keyword("strides"))) {
+    opts.strides = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("padding"))) {
+    opts.padding = parse_padding_list(term);
+  }
+
+  if ((term = get_keyword("input_dilation"))) {
+    opts.input_dilation = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("kernel_dilation"))) {
+    opts.kernel_dilation = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("feature_group_size"))) {
+    long val;
+    if (enif_get_long(env, term, &val)) {
+      opts.feature_group_size = static_cast<int64_t>(val);
+    }
+  }
+
+  if ((term = get_keyword("batch_group_size"))) {
+    long val;
+    if (enif_get_long(env, term, &val)) {
+      opts.batch_group_size = static_cast<int64_t>(val);
+    }
+  }
+
+  if ((term = get_keyword("input_permutation"))) {
+    opts.input_permutation = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("kernel_permutation"))) {
+    opts.kernel_permutation = parse_int_list(term);
+  }
+
+  if ((term = get_keyword("output_permutation"))) {
+    opts.output_permutation = parse_int_list(term);
+  }
+
+  return opts;
+}
+
+// Convolution implementation
+static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
+                             const ERL_NIF_TERM argv[]) {
+  if (argc != 3) {
+    return enif_make_badarg(env);
+  }
+
+  try {
+    // Decode tensor resources using Fine's decoder
+    auto tensor = fine::decode<fine::ResourcePtr<EigenTensor>>(env, argv[0]);
+    auto kernel = fine::decode<fine::ResourcePtr<EigenTensor>>(env, argv[1]);
+
+    // Parse options
+    ConvOptions opts = parse_conv_options(env, argv[2]);
+
+    auto result = fine::make_resource<EigenTensor>();
+
+    int rank = tensor->shape.size();
+    int kernel_rank = kernel->shape.size();
+
+    // Validate inputs
+    if (rank < 3 || kernel_rank < 3) {
+      throw std::runtime_error("conv requires at least 3D tensors");
+    }
+
+    // Extract dimensions
+    // Input: [batch, in_channels, spatial_dims...]
+    // Kernel: [out_channels, in_channels/feature_groups, spatial_dims...]
+    int64_t batch_size = tensor->shape[0];
+    int64_t in_channels = tensor->shape[1];
+    int64_t out_channels = kernel->shape[0];
+
+    int spatial_dims = rank - 2;
+
+    // Calculate output spatial dimensions
+    std::vector<int64_t> out_shape = {batch_size, out_channels};
+
+    for (int i = 0; i < spatial_dims; ++i) {
+      int64_t in_size = tensor->shape[i + 2];
+      int64_t kernel_size = kernel->shape[i + 2];
+      int64_t stride = opts.strides.empty() ? 1 : opts.strides[i];
+      int64_t input_dil =
+          opts.input_dilation.empty() ? 1 : opts.input_dilation[i];
+      int64_t kernel_dil =
+          opts.kernel_dilation.empty() ? 1 : opts.kernel_dilation[i];
+      int64_t pad_left = opts.padding.empty() ? 0 : opts.padding[i].first;
+      int64_t pad_right = opts.padding.empty() ? 0 : opts.padding[i].second;
+
+      // Effective input/kernel sizes with dilation
+      int64_t dilated_in_size = (in_size - 1) * input_dil + 1;
+      int64_t dilated_kernel_size = (kernel_size - 1) * kernel_dil + 1;
+
+      // Output size formula
+      int64_t out_size =
+          (dilated_in_size + pad_left + pad_right - dilated_kernel_size) /
+              stride +
+          1;
+      out_shape.push_back(out_size);
+    }
+
+    result->shape = out_shape;
+
+    // Perform convolution - output is always floating point
+    std::visit(
+        [&](auto &tensor_arr) {
+          using InputScalar =
+              typename std::decay_t<decltype(tensor_arr)>::Scalar;
+          auto &kernel_arr = std::get<FlatArray<InputScalar>>(kernel->data);
+
+          // Determine output type (floating point version of input)
+          using OutputScalar = typename std::conditional<
+              std::is_same_v<InputScalar, std::complex<float>> ||
+                  std::is_same_v<InputScalar, std::complex<double>>,
+              InputScalar, // Complex types stay complex
+              typename std::conditional<(sizeof(InputScalar) > 4 ||
+                                         std::is_same_v<InputScalar, double>),
+                                        double, // Use double for large or
+                                                // double inputs
+                                        float   // Use float for everything else
+                                        >::type>::type;
+
+          auto &out_arr = result->data.emplace<FlatArray<OutputScalar>>();
+
+          size_t out_size = 1;
+          for (auto dim : out_shape)
+            out_size *= dim;
+          out_arr.resize(out_size);
+          out_arr.setZero();
+
+          // Compute strides for input, kernel, and output
+          std::vector<int64_t> in_strides(rank);
+          in_strides[rank - 1] = 1;
+          for (int i = rank - 2; i >= 0; --i) {
+            in_strides[i] = in_strides[i + 1] * tensor->shape[i + 1];
+          }
+
+          std::vector<int64_t> kernel_strides(kernel_rank);
+          kernel_strides[kernel_rank - 1] = 1;
+          for (int i = kernel_rank - 2; i >= 0; --i) {
+            kernel_strides[i] = kernel_strides[i + 1] * kernel->shape[i + 1];
+          }
+
+          std::vector<int64_t> out_strides(rank);
+          out_strides[rank - 1] = 1;
+          for (int i = rank - 2; i >= 0; --i) {
+            out_strides[i] = out_strides[i + 1] * out_shape[i + 1];
+          }
+
+          // Simplified convolution (without groups for now)
+          int64_t kernel_channels = kernel->shape[1];
+
+          // For each output position
+          for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t oc = 0; oc < out_channels; ++oc) {
+              // Get output spatial coordinates
+              std::function<void(int, std::vector<int64_t> &)> iterate_spatial;
+              iterate_spatial = [&](int dim, std::vector<int64_t> &out_coords) {
+                if (dim == spatial_dims) {
+                  // Compute convolution at this output position
+                  size_t out_idx = b * out_strides[0] + oc * out_strides[1];
+                  for (int i = 0; i < spatial_dims; ++i) {
+                    out_idx += out_coords[i] * out_strides[i + 2];
+                  }
+
+                  // Sum over kernel
+                  for (int64_t ic = 0; ic < kernel_channels; ++ic) {
+                    std::function<void(int, std::vector<int64_t> &)>
+                        iterate_kernel;
+                    iterate_kernel = [&](int kdim,
+                                         std::vector<int64_t> &kcoords) {
+                      if (kdim == spatial_dims) {
+                        // Compute input position
+                        std::vector<int64_t> in_coords(spatial_dims);
+                        bool valid = true;
+                        for (int i = 0; i < spatial_dims; ++i) {
+                          int64_t stride =
+                              opts.strides.empty() ? 1 : opts.strides[i];
+                          int64_t input_dil = opts.input_dilation.empty()
+                                                  ? 1
+                                                  : opts.input_dilation[i];
+                          int64_t kernel_dil = opts.kernel_dilation.empty()
+                                                   ? 1
+                                                   : opts.kernel_dilation[i];
+                          int64_t pad_left =
+                              opts.padding.empty() ? 0 : opts.padding[i].first;
+
+                          int64_t in_pos = out_coords[i] * stride +
+                                           kcoords[i] * kernel_dil - pad_left;
+
+                          // Apply input dilation
+                          if (input_dil > 1) {
+                            if (in_pos % input_dil != 0) {
+                              valid = false;
+                              break;
+                            }
+                            in_pos /= input_dil;
+                          }
+
+                          if (in_pos < 0 || in_pos >= tensor->shape[i + 2]) {
+                            valid = false;
+                            break;
+                          }
+                          in_coords[i] = in_pos;
+                        }
+
+                        if (valid) {
+                          // Compute indices
+                          size_t in_idx =
+                              b * in_strides[0] + ic * in_strides[1];
+                          for (int i = 0; i < spatial_dims; ++i) {
+                            in_idx += in_coords[i] * in_strides[i + 2];
+                          }
+
+                          size_t kernel_idx =
+                              oc * kernel_strides[0] + ic * kernel_strides[1];
+                          for (int i = 0; i < spatial_dims; ++i) {
+                            kernel_idx += kcoords[i] * kernel_strides[i + 2];
+                          }
+
+                          out_arr[out_idx] +=
+                              static_cast<OutputScalar>(tensor_arr[in_idx]) *
+                              static_cast<OutputScalar>(kernel_arr[kernel_idx]);
+                        }
+                        return;
+                      }
+
+                      for (int64_t k = 0; k < kernel->shape[kdim + 2]; ++k) {
+                        kcoords[kdim] = k;
+                        iterate_kernel(kdim + 1, kcoords);
+                      }
+                    };
+
+                    std::vector<int64_t> kcoords(spatial_dims);
+                    iterate_kernel(0, kcoords);
+                  }
+                  return;
+                }
+
+                for (int64_t i = 0; i < out_shape[dim + 2]; ++i) {
+                  out_coords[dim] = i;
+                  iterate_spatial(dim + 1, out_coords);
+                }
+              };
+
+              std::vector<int64_t> out_coords(spatial_dims);
+              iterate_spatial(0, out_coords);
+            }
+          }
+        },
+        tensor->data);
+
+    return fine::Encoder<fine::ResourcePtr<EigenTensor>>::encode(env, result);
+  } catch (const std::exception &e) {
+    return enif_raise_exception(
+        env, enif_make_string(
+                 env, (std::string("conv_nif error: ") + e.what()).c_str(),
+                 ERL_NIF_LATIN1));
+  }
+}
+
+// Register the manual NIF
+static auto __nif_registration_conv =
+    fine::Registration::register_nif({"conv_nif", 3, conv_nif, 0});
+
+// Helper to check for complex type
+template <typename T> struct is_complex : std::false_type {};
+template <typename T> struct is_complex<std::complex<T>> : std::true_type {};
+template <typename T> inline constexpr bool is_complex_v = is_complex<T>::value;
+
+// Helper to get value type safely
+template <typename T> struct complex_value_type {
+  using type = T;
+};
+
+template <typename T> struct complex_value_type<std::complex<T>> {
+  using type = T;
+};
+
+// Constant/Eye/Iota
+fine::ResourcePtr<EigenTensor>
+constant_nif(ErlNifEnv *env, ScalarType type, std::vector<int64_t> shape,
+             fine::ResourcePtr<EigenTensor> value_tensor) {
   auto tensor = fine::make_resource<EigenTensor>();
   tensor->shape = shape;
 
@@ -2007,12 +3494,52 @@ fine::ResourcePtr<EigenTensor> constant_nif(ErlNifEnv *env, ScalarType type,
     auto &arr = tensor->data.emplace<FlatArray<Scalar>>();
     arr.resize(num_elements);
 
-    // Handle complex vs real types
-    if constexpr (Eigen::NumTraits<Scalar>::IsComplex) {
-      arr.setConstant(Scalar(value.real, value.imag));
-    } else {
-      arr.setConstant(static_cast<Scalar>(value.real));
-    }
+    // Get value from scalar tensor
+    std::visit(
+        [&](auto &val_arr) {
+          using ValScalar = typename std::decay_t<decltype(val_arr)>::Scalar;
+
+          if (val_arr.size() != 1) {
+            throw std::runtime_error("constant value must be a scalar tensor");
+          }
+
+          Scalar val;
+          if constexpr (std::is_same_v<Scalar, ValScalar>) {
+            val = val_arr[0];
+          } else if constexpr (std::is_arithmetic_v<Scalar> &&
+                               std::is_arithmetic_v<ValScalar>) {
+            val = static_cast<Scalar>(val_arr[0]);
+          } else {
+            if constexpr (is_complex_v<Scalar>) {
+              if constexpr (is_complex_v<ValScalar>) {
+                using T = typename complex_value_type<Scalar>::type;
+                T r = static_cast<T>(val_arr[0].real());
+                T i = static_cast<T>(val_arr[0].imag());
+                val = Scalar(r, i);
+              } else {
+                // Complex from Real
+                using T = typename complex_value_type<Scalar>::type;
+                val = Scalar(static_cast<T>(val_arr[0]));
+              }
+            } else {
+              // Scalar is Real
+              if constexpr (is_complex_v<ValScalar>) {
+                // Real from Complex
+                val = static_cast<Scalar>(val_arr[0].real());
+              } else {
+                // Real from Real
+                if constexpr (std::is_constructible_v<Scalar, ValScalar>) {
+                  val = static_cast<Scalar>(val_arr[0]);
+                } else {
+                  val = {};
+                }
+              }
+            }
+          }
+
+          arr.setConstant(val);
+        },
+        value_tensor->data);
   };
 
   switch (type) {
@@ -2059,24 +3586,40 @@ FINE_NIF(constant_nif, 0);
 
 fine::ResourcePtr<EigenTensor> eye_nif(ErlNifEnv *env, ScalarType type,
                                        std::vector<int64_t> shape) {
-  if (shape.size() != 2)
-    throw std::runtime_error("Eye is only for 2D tensors");
+  if (shape.size() < 2)
+    throw std::runtime_error("Eye requires at least 2 dimensions");
 
   auto tensor = fine::make_resource<EigenTensor>();
   tensor->shape = shape;
-  int rows = shape[0];
-  int cols = shape[1];
+
+  // Last 2 dimensions define the identity matrix
+  int rows = shape[shape.size() - 2];
+  int cols = shape[shape.size() - 1];
+
+  // Calculate batch size from all preceding dimensions
+  size_t batch_size = 1;
+  for (size_t i = 0; i < shape.size() - 2; ++i) {
+    batch_size *= shape[i];
+  }
+
+  size_t matrix_elements = rows * cols;
+  size_t total_elements = batch_size * matrix_elements;
 
   auto init = [&](auto scalar_ptr) {
     using Scalar = std::decay_t<decltype(*scalar_ptr)>;
     auto &arr = tensor->data.emplace<FlatArray<Scalar>>();
-    // Construct Matrix to use setIdentity, then map to Array
+    arr.resize(total_elements);
+
+    // Create identity matrix template
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> mat(
         rows, cols);
     mat.setIdentity();
-    // Copy data
-    arr.resize(rows * cols);
-    std::memcpy(arr.data(), mat.data(), rows * cols * sizeof(Scalar));
+
+    // Copy identity matrix to each batch
+    for (size_t batch = 0; batch < batch_size; ++batch) {
+      std::memcpy(arr.data() + batch * matrix_elements, mat.data(),
+                  matrix_elements * sizeof(Scalar));
+    }
   };
 
   switch (type) {
@@ -2461,6 +4004,7 @@ pad_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
         for (size_t i = 0; i < total_in; ++i) {
           size_t temp = i;
           size_t out_idx = 0;
+          bool skip_element = false;
 
           for (int d = 0; d < rank; ++d) {
             size_t coord = temp / input_strides[d];
@@ -2470,9 +4014,22 @@ pad_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
             int64_t interior = config[d][2];
 
             // Map input coord to output coord
-            size_t out_coord = low + coord * (interior + 1);
+            int64_t out_coord = low + coord * (interior + 1);
+
+            // Check if this coordinate is within the output bounds
+            if (out_coord < 0 || out_coord >= output_shape[d]) {
+              skip_element = true;
+              break;
+            }
+
             out_idx += out_coord * output_strides[d];
           }
+
+          // Skip if element is outside output bounds
+          if (skip_element) {
+            continue;
+          }
+
           if (out_idx >= total_out) {
             throw std::runtime_error(
                 "pad_nif: computed output index " + std::to_string(out_idx) +
@@ -2667,10 +4224,11 @@ fine::ResourcePtr<EigenTensor> all_nif(ErlNifEnv *env,
   std::visit(
       [&](auto &in_arr) {
         using T = typename std::decay_t<decltype(in_arr)>::Scalar;
-        auto &out_arr = result->data.emplace<FlatArray<T>>();
+        // All/any always return u8
+        auto &out_arr = result->data.emplace<FlatArray<uint8_t>>();
         out_arr.resize(total_out);
         for (size_t i = 0; i < total_out; ++i)
-          out_arr[i] = static_cast<T>(1);
+          out_arr[i] = 1;
         for (size_t i = 0; i < in_arr.size(); ++i) {
           size_t out_idx = 0;
           for (int d = 0; d < in_rank; ++d) {
@@ -2682,10 +4240,10 @@ fine::ResourcePtr<EigenTensor> all_nif(ErlNifEnv *env,
                 "all_nif: computed output index " + std::to_string(out_idx) +
                 " out of bounds (size: " + std::to_string(total_out) + ")");
           }
-          out_arr[out_idx] = (out_arr[out_idx] != static_cast<T>(0) &&
-                              in_arr[i] != static_cast<T>(0))
-                                 ? static_cast<T>(1)
-                                 : static_cast<T>(0);
+          // AND operation: if any element is 0, result is 0
+          if (in_arr[i] == static_cast<T>(0)) {
+            out_arr[out_idx] = 0;
+          }
         }
       },
       tensor->data);
@@ -2700,10 +4258,11 @@ fine::ResourcePtr<EigenTensor> any_nif(ErlNifEnv *env,
   std::visit(
       [&](auto &in_arr) {
         using T = typename std::decay_t<decltype(in_arr)>::Scalar;
-        auto &out_arr = result->data.emplace<FlatArray<T>>();
+        // All/any always return u8
+        auto &out_arr = result->data.emplace<FlatArray<uint8_t>>();
         out_arr.resize(total_out);
         for (size_t i = 0; i < total_out; ++i)
-          out_arr[i] = static_cast<T>(0);
+          out_arr[i] = 0;
         for (size_t i = 0; i < in_arr.size(); ++i) {
           size_t out_idx = 0;
           for (int d = 0; d < in_rank; ++d) {
@@ -2715,10 +4274,10 @@ fine::ResourcePtr<EigenTensor> any_nif(ErlNifEnv *env,
                 "any_nif: computed output index " + std::to_string(out_idx) +
                 " out of bounds (size: " + std::to_string(total_out) + ")");
           }
-          out_arr[out_idx] = (out_arr[out_idx] != static_cast<T>(0) ||
-                              in_arr[i] != static_cast<T>(0))
-                                 ? static_cast<T>(1)
-                                 : static_cast<T>(0);
+          // OR operation: if any element is non-zero, result is 1
+          if (in_arr[i] != static_cast<T>(0)) {
+            out_arr[out_idx] = 1;
+          }
         }
       },
       tensor->data);
@@ -2732,8 +4291,19 @@ struct ArgMaxOp {
     return std::numeric_limits<T>::lowest();
   }
   template <typename T>
-  static bool should_update(const T &val, const T &current) {
-    return val > current;
+  static bool should_update(const T &val, const T &current, bool tie_break_high) {
+    // NaN always wins (NaN propagates)
+    if (std::isnan(val) && !std::isnan(current)) return true;
+    // Don't replace NaN with non-NaN
+    if (std::isnan(current)) return false;
+    // If val is also NaN, normal comparison (which will be false, so no update unless tie_break_high with NaN==NaN)
+    if (std::isnan(val)) return false;
+
+    if (tie_break_high) {
+      return val >= current;  // >= to prefer higher index on ties
+    } else {
+      return val > current;   // > to prefer lower index on ties
+    }
   }
 };
 
@@ -2742,8 +4312,19 @@ struct ArgMinOp {
     return std::numeric_limits<T>::max();
   }
   template <typename T>
-  static bool should_update(const T &val, const T &current) {
-    return val < current;
+  static bool should_update(const T &val, const T &current, bool tie_break_high) {
+    // NaN always wins (NaN propagates)
+    if (std::isnan(val) && !std::isnan(current)) return true;
+    // Don't replace NaN with non-NaN
+    if (std::isnan(current)) return false;
+    // If val is also NaN, normal comparison (which will be false, so no update unless tie_break_high with NaN==NaN)
+    if (std::isnan(val)) return false;
+
+    if (tie_break_high) {
+      return val <= current;  // <= to prefer higher index on ties
+    } else {
+      return val < current;   // < to prefer lower index on ties
+    }
   }
 };
 
@@ -2751,7 +4332,7 @@ struct ArgMinOp {
 template <typename ArgOp>
 fine::ResourcePtr<EigenTensor>
 arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
-                int64_t axis) { // -1 for flat
+                int64_t axis, int64_t tie_break) { // -1 for flat, tie_break: 0=low, 1=high
   auto result = fine::make_resource<EigenTensor>();
 
   // Output shape
@@ -2783,10 +4364,20 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
   for (auto d : output_shape)
     total_out *= d;
 
+  // Pre-calculate output strides
+  std::vector<size_t> output_strides(output_shape.size());
+  size_t out_stride = 1;
+  for (int i = (int)output_shape.size() - 1; i >= 0; --i) {
+    output_strides[i] = out_stride;
+    out_stride *= output_shape[i];
+  }
+
   // For argmax, output is indices, so usually S64 or U64.
   // Nx default is S64.
   auto &out_arr = result->data.emplace<FlatArray<int64_t>>();
   out_arr.resize(total_out);
+  // Initialize all indices to 0
+  std::fill(out_arr.begin(), out_arr.end(), 0);
 
   // We also need a "values" array to track current max value for comparison
   // We can't store it in result->data because result is int64.
@@ -2820,12 +4411,7 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
               out_idx = 0;
               current_axis_idx = i; // Flat index
             } else {
-              size_t out_stride_calc = 1;
-              // We need to map input coords to output coords to linear out_idx
-              // Iterate output dims (which are input dims minus 'axis')
-              // This mapping is trickier.
-
-              // Easier: calculate all input coords
+              // Calculate all input coords
               std::vector<size_t> coords(in_rank);
               size_t t = i;
               for (int d = in_rank - 1; d >= 0; --d) {
@@ -2835,13 +4421,13 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 
               current_axis_idx = coords[axis];
 
-              // calculate out_idx from coords excluding axis
-              size_t mult = 1;
-              for (int d = in_rank - 1; d >= 0; --d) {
-                if (d == axis)
-                  continue;
-                out_idx += coords[d] * mult;
-                mult *= tensor->shape[d];
+              // Map from input coords to output coords (excluding reduced axis)
+              int out_dim = 0;
+              for (int d = 0; d < in_rank; ++d) {
+                if (d != axis) {
+                  out_idx += coords[d] * output_strides[out_dim];
+                  out_dim++;
+                }
               }
             }
 
@@ -2855,7 +4441,8 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 
             // Compare and update
             T val = in_arr[i];
-            if (ArgOp::should_update(val, val_buffer[out_idx])) {
+            bool tie_break_high = (tie_break == 1);
+            if (ArgOp::should_update(val, val_buffer[out_idx], tie_break_high)) {
               val_buffer[out_idx] = val;
               out_arr[out_idx] = current_axis_idx;
             }
@@ -2870,15 +4457,17 @@ arg_reduce_impl(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
 // Separate argmax and argmin NIFs
 fine::ResourcePtr<EigenTensor> argmax_nif(ErlNifEnv *env,
                                           fine::ResourcePtr<EigenTensor> tensor,
-                                          int64_t axis) {
-  return arg_reduce_impl<ArgMaxOp>(env, tensor, axis);
+                                          int64_t axis,
+                                          int64_t tie_break) {
+  return arg_reduce_impl<ArgMaxOp>(env, tensor, axis, tie_break);
 }
 FINE_NIF(argmax_nif, 0);
 
 fine::ResourcePtr<EigenTensor> argmin_nif(ErlNifEnv *env,
                                           fine::ResourcePtr<EigenTensor> tensor,
-                                          int64_t axis) {
-  return arg_reduce_impl<ArgMinOp>(env, tensor, axis);
+                                          int64_t axis,
+                                          int64_t tie_break) {
+  return arg_reduce_impl<ArgMinOp>(env, tensor, axis, tie_break);
 }
 FINE_NIF(argmin_nif, 0);
 
@@ -2890,10 +4479,16 @@ fine::ResourcePtr<EigenTensor> slice_nif(ErlNifEnv *env,
                                          std::vector<int64_t> lengths,
                                          std::vector<int64_t> strides) {
   auto result = fine::make_resource<EigenTensor>();
-  result->shape = lengths;
+
+  // Calculate output shape: ceil(lengths[i] / strides[i])
+  // lengths is the input length before stride application
+  int rank = tensor->shape.size();
+  result->shape.resize(rank);
+  for (int i = 0; i < rank; ++i) {
+    result->shape[i] = (lengths[i] + strides[i] - 1) / strides[i];
+  }
 
   // Calculate input and output strides for indexing
-  int rank = tensor->shape.size();
   std::vector<size_t> in_strides(rank);
   size_t stride = 1;
   for (int i = rank - 1; i >= 0; --i) {
@@ -2905,7 +4500,7 @@ fine::ResourcePtr<EigenTensor> slice_nif(ErlNifEnv *env,
   stride = 1;
   for (int i = rank - 1; i >= 0; --i) {
     out_strides[i] = stride;
-    stride *= lengths[i];
+    stride *= result->shape[i];
   }
   size_t total_out = stride;
 
@@ -2922,8 +4517,8 @@ fine::ResourcePtr<EigenTensor> slice_nif(ErlNifEnv *env,
           size_t in_idx = 0;
 
           for (int d = rank - 1; d >= 0; --d) {
-            int64_t out_coord = temp % lengths[d];
-            temp /= lengths[d];
+            int64_t out_coord = temp % result->shape[d];
+            temp /= result->shape[d];
 
             // Map to input coordinate using start + out_coord * stride
             int64_t in_coord = start_indices[d] + out_coord * strides[d];
@@ -2961,77 +4556,81 @@ fine::ResourcePtr<EigenTensor>
 put_slice_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
               fine::ResourcePtr<EigenTensor> slice,
               std::vector<int64_t> start_indices) {
-  auto result = fine::make_resource<EigenTensor>();
-  result->shape = tensor->shape;
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = tensor->shape;
 
-  // Calculate strides
-  int rank = tensor->shape.size();
-  std::vector<size_t> tensor_strides(rank);
-  size_t stride = 1;
-  for (int i = rank - 1; i >= 0; --i) {
-    tensor_strides[i] = stride;
-    stride *= tensor->shape[i];
-  }
-  size_t total_size = stride;
+    // Calculate strides
+    int rank = tensor->shape.size();
+    std::vector<size_t> tensor_strides(rank);
+    size_t stride = 1;
+    for (int i = rank - 1; i >= 0; --i) {
+      tensor_strides[i] = stride;
+      stride *= tensor->shape[i];
+    }
+    size_t total_size = stride;
 
-  std::vector<size_t> slice_strides(rank);
-  stride = 1;
-  for (int i = rank - 1; i >= 0; --i) {
-    slice_strides[i] = stride;
-    stride *= slice->shape[i];
-  }
-  size_t slice_size = stride;
+    std::vector<size_t> slice_strides(rank);
+    stride = 1;
+    for (int i = rank - 1; i >= 0; --i) {
+      slice_strides[i] = stride;
+      stride *= slice->shape[i];
+    }
+    size_t slice_size = stride;
 
-  std::visit(
-      [&](auto &tensor_arr) {
-        using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
-        auto &out_arr = result->data.emplace<FlatArray<T>>();
-        out_arr.resize(total_size);
+    std::visit(
+        [&](auto &tensor_arr) {
+          using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
+          auto &out_arr = result->data.emplace<FlatArray<T>>();
+          out_arr.resize(total_size);
 
-        // Copy original tensor
-        out_arr = tensor_arr;
+          // Copy original tensor
+          out_arr = tensor_arr;
 
-        // Get slice data (must be same type)
-        auto &slice_arr = std::get<FlatArray<T>>(slice->data);
+          // Get slice data (must be same type)
+          auto &slice_arr = std::get<FlatArray<T>>(slice->data);
 
-        // Overwrite the slice region
-        for (size_t slice_idx = 0; slice_idx < slice_size; ++slice_idx) {
-          // Convert slice linear index to coordinates
-          size_t temp = slice_idx;
-          size_t tensor_idx = 0;
+          // Overwrite the slice region
+          for (size_t slice_idx = 0; slice_idx < slice_size; ++slice_idx) {
+            // Convert slice linear index to coordinates
+            size_t temp = slice_idx;
+            size_t tensor_idx = 0;
 
-          for (int d = rank - 1; d >= 0; --d) {
-            int64_t slice_coord = temp % slice->shape[d];
-            temp /= slice->shape[d];
+            for (int d = rank - 1; d >= 0; --d) {
+              int64_t slice_coord = temp % slice->shape[d];
+              temp /= slice->shape[d];
 
-            // Map to tensor coordinate
-            int64_t tensor_coord = start_indices[d] + slice_coord;
+              // Map to tensor coordinate
+              int64_t tensor_coord = start_indices[d] + slice_coord;
 
-            // Bounds check
-            if (tensor_coord < 0 || tensor_coord >= tensor->shape[d]) {
-              throw std::runtime_error(
-                  "put_slice_nif: tensor coordinate " +
-                  std::to_string(tensor_coord) +
-                  " out of bounds at dimension " + std::to_string(d) +
-                  " (size: " + std::to_string(tensor->shape[d]) + ")");
+              // Bounds check
+              if (tensor_coord < 0 || tensor_coord >= tensor->shape[d]) {
+                throw std::runtime_error(
+                    "put_slice_nif: tensor coordinate " +
+                    std::to_string(tensor_coord) +
+                    " out of bounds at dimension " + std::to_string(d) +
+                    " (size: " + std::to_string(tensor->shape[d]) + ")");
+              }
+
+              tensor_idx += tensor_coord * tensor_strides[d];
             }
 
-            tensor_idx += tensor_coord * tensor_strides[d];
+            // Bounds check on computed index
+            if (tensor_idx >= total_size) {
+              throw std::runtime_error(
+                  "put_slice_nif: computed index " + std::to_string(tensor_idx) +
+                  " out of bounds (size: " + std::to_string(total_size) + ")");
+            }
+
+            out_arr[tensor_idx] = slice_arr[slice_idx];
           }
+        },
+        tensor->data);
 
-          // Bounds check on computed index
-          if (tensor_idx >= total_size) {
-            throw std::runtime_error(
-                "put_slice_nif: computed index " + std::to_string(tensor_idx) +
-                " out of bounds (size: " + std::to_string(total_size) + ")");
-          }
-
-          out_arr[tensor_idx] = slice_arr[slice_idx];
-        }
-      },
-      tensor->data);
-
-  return result;
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("put_slice_nif error: ") + e.what());
+  }
 }
 FINE_NIF(put_slice_nif, 0);
 
@@ -3062,25 +4661,38 @@ select_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> pred,
         },
         pred->data);
 
+    // Verify that on_true and on_false have the same variant type
+    if (on_true->data.index() != on_false->data.index()) {
+      throw std::runtime_error(
+          "select_nif: on_true and on_false must have the same type");
+    }
+
     std::visit(
         [&](auto &true_arr) {
           using T = typename std::decay_t<decltype(true_arr)>::Scalar;
           auto &out_arr = result->data.emplace<FlatArray<T>>();
           out_arr.resize(total_size);
 
+          // Safe get with type checking
+          if (!std::holds_alternative<FlatArray<T>>(on_false->data)) {
+            throw std::runtime_error(
+                "select_nif: type mismatch between on_true and on_false");
+          }
           auto &false_arr = std::get<FlatArray<T>>(on_false->data);
 
+          // All inputs should have same size after backend broadcasting
+          if (pred_vec.size() != total_size || true_arr.size() != total_size ||
+              false_arr.size() != total_size) {
+            throw std::runtime_error(
+                "select_nif: size mismatch - expected all inputs to be "
+                "broadcast to same size " +
+                std::to_string(total_size) +
+                ", got pred: " + std::to_string(pred_vec.size()) +
+                ", true: " + std::to_string(true_arr.size()) +
+                ", false: " + std::to_string(false_arr.size()));
+          }
+
           for (size_t i = 0; i < total_size; ++i) {
-            // Bounds checks
-            if (i >= pred_vec.size() || i >= true_arr.size() ||
-                i >= false_arr.size()) {
-              throw std::runtime_error(
-                  "select_nif: index " + std::to_string(i) +
-                  " out of bounds (pred size: " +
-                  std::to_string(pred_vec.size()) +
-                  ", true size: " + std::to_string(true_arr.size()) +
-                  ", false size: " + std::to_string(false_arr.size()) + ")");
-            }
             // Non-zero predicate means true
             out_arr[i] = (pred_vec[i] != 0) ? true_arr[i] : false_arr[i];
           }
@@ -3095,23 +4707,19 @@ select_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> pred,
 FINE_NIF(select_nif, 0);
 
 // Gather operation
-// Gather elements from tensor at specified indices along an axis
+// Gather elements from tensor using multi-dimensional indices
+// When indices has shape [..., num_axes], the last dimension specifies
+// coordinates
 fine::ResourcePtr<EigenTensor>
 gather_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
            fine::ResourcePtr<EigenTensor> indices, int64_t axis) {
   try {
     auto result = fine::make_resource<EigenTensor>();
 
-    int rank = tensor->shape.size();
+    int tensor_rank = tensor->shape.size();
+    int indices_rank = indices->shape.size();
 
-    // Validate axis
-    if (axis < 0 || axis >= rank) {
-      throw std::runtime_error("gather_nif: axis " + std::to_string(axis) +
-                               " out of range for tensor with rank " +
-                               std::to_string(rank));
-    }
-
-    // Extract indices - need to handle different integer types
+    // Extract indices as vector
     std::vector<int64_t> idx_vec;
     std::visit(
         [&](auto &idx_arr) {
@@ -3128,92 +4736,214 @@ gather_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
         },
         indices->data);
 
-    // For Nx.gather: indices is 1D and replaces the axis dimension
-    // Output shape: tensor.shape with shape[axis] replaced by indices.size()
-    result->shape = tensor->shape;
-    result->shape[axis] = idx_vec.size();
+    // Check if this is multi-dimensional gather (last dim of indices = num
+    // axes) or single-axis gather
+    int num_index_axes = indices->shape[indices_rank - 1];
+    bool is_multi_dim_gather = (num_index_axes == tensor_rank);
 
-    // Calculate total output size
-    size_t total_out = 1;
-    for (auto dim : result->shape)
-      total_out *= dim;
+    if (is_multi_dim_gather && num_index_axes > 1) {
+      // Multi-dimensional gather when gathering ALL axes (axis must be 0)
+      // indices shape [..., tensor_rank]
+      // Output shape is indices.shape[0:-1] (no non-gathered dims)
+      std::vector<int64_t> output_shape;
+      for (int i = 0; i < indices_rank - 1; ++i) {
+        output_shape.push_back(indices->shape[i]);
+      }
+      result->shape = output_shape;
 
-    // Calculate tensor strides
-    std::vector<size_t> tensor_strides(rank);
-    size_t stride = 1;
-    for (int i = rank - 1; i >= 0; --i) {
-      tensor_strides[i] = stride;
-      stride *= tensor->shape[i];
+      size_t num_gathers = idx_vec.size() / num_index_axes;
+
+      // Calculate tensor strides
+      std::vector<size_t> tensor_strides(tensor_rank);
+      size_t stride = 1;
+      for (int i = tensor_rank - 1; i >= 0; --i) {
+        tensor_strides[i] = stride;
+        stride *= tensor->shape[i];
+      }
+
+      std::visit(
+          [&](auto &tensor_arr) {
+            using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
+            auto &out_arr = result->data.emplace<FlatArray<T>>();
+            out_arr.resize(num_gathers);
+
+            for (size_t i = 0; i < num_gathers; ++i) {
+              // Get coordinates from indices (these should be for axes starting
+              // at 'axis')
+              size_t in_linear = 0;
+              for (int ax = 0; ax < num_index_axes; ++ax) {
+                int64_t coord = idx_vec[i * num_index_axes + ax];
+                int tensor_ax = axis + ax;
+
+                // Bounds check
+                if (coord < 0 || coord >= tensor->shape[tensor_ax]) {
+                  throw std::runtime_error(
+                      "gather_nif: index " + std::to_string(coord) +
+                      " out of bounds for tensor axis " +
+                      std::to_string(tensor_ax) + " with size " +
+                      std::to_string(tensor->shape[tensor_ax]));
+                }
+
+                in_linear += coord * tensor_strides[tensor_ax];
+              }
+
+              // Bounds check
+              if (in_linear >= tensor_arr.size()) {
+                throw std::runtime_error(
+                    "gather_nif: computed input index " +
+                    std::to_string(in_linear) + " out of bounds (size: " +
+                    std::to_string(tensor_arr.size()) + ")");
+              }
+
+              out_arr[i] = tensor_arr[in_linear];
+            }
+          },
+          tensor->data);
+
+    } else {
+      // General gather: indices shape is [..., num_gather_axes]
+      // Output shape is: indices.shape[:-1] +
+      // tensor.shape[axis+num_gather_axes:]
+
+      // Validate axis
+      if (axis < 0 || axis >= tensor_rank) {
+        throw std::runtime_error("gather_nif: axis " + std::to_string(axis) +
+                                 " out of range for tensor with rank " +
+                                 std::to_string(tensor_rank));
+      }
+
+      // Build output shape: indices dimensions (except last) + ALL non-gathered
+      // tensor dimensions
+      std::vector<int64_t> output_shape;
+      for (int i = 0; i < indices_rank - 1; ++i) {
+        output_shape.push_back(indices->shape[i]);
+      }
+      // Add non-gathered tensor dimensions (before gathered axes)
+      for (int i = 0; i < axis; ++i) {
+        output_shape.push_back(tensor->shape[i]);
+      }
+      // Add non-gathered tensor dimensions (after gathered axes)
+      for (int i = axis + num_index_axes; i < tensor_rank; ++i) {
+        output_shape.push_back(tensor->shape[i]);
+      }
+      result->shape = output_shape;
+
+      size_t total_out = 1;
+      for (auto dim : output_shape)
+        total_out *= dim;
+
+      // Calculate tensor strides
+      std::vector<size_t> tensor_strides(tensor_rank);
+      size_t stride = 1;
+      for (int i = tensor_rank - 1; i >= 0; --i) {
+        tensor_strides[i] = stride;
+        stride *= tensor->shape[i];
+      }
+
+      // Calculate output strides
+      int output_rank = output_shape.size();
+      std::vector<size_t> output_strides(output_rank);
+      stride = 1;
+      for (int i = output_rank - 1; i >= 0; --i) {
+        output_strides[i] = stride;
+        stride *= output_shape[i];
+      }
+
+      // Number of index tuples
+      size_t num_index_tuples = idx_vec.size() / num_index_axes;
+
+      // Collect non-gathered tensor dimensions and their sizes
+      std::vector<int64_t> non_gathered_dims;
+      std::vector<int> non_gathered_axes;
+      for (int i = 0; i < tensor_rank; ++i) {
+        if (i < axis || i >= axis + num_index_axes) {
+          non_gathered_dims.push_back(tensor->shape[i]);
+          non_gathered_axes.push_back(i);
+        }
+      }
+
+      size_t non_gathered_size = 1;
+      for (auto dim : non_gathered_dims) {
+        non_gathered_size *= dim;
+      }
+
+      std::visit(
+          [&](auto &tensor_arr) {
+            using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
+            auto &out_arr = result->data.emplace<FlatArray<T>>();
+            out_arr.resize(total_out);
+
+            // Iterate through all output elements
+            for (size_t idx_tuple_idx = 0; idx_tuple_idx < num_index_tuples;
+                 ++idx_tuple_idx) {
+              // Extract coordinates from this index tuple
+              std::vector<int64_t> gather_coords(num_index_axes);
+              for (int ax = 0; ax < num_index_axes; ++ax) {
+                gather_coords[ax] =
+                    idx_vec[idx_tuple_idx * num_index_axes + ax];
+
+                // Bounds check
+                int tensor_ax = axis + ax;
+                if (gather_coords[ax] < 0 ||
+                    gather_coords[ax] >= tensor->shape[tensor_ax]) {
+                  throw std::runtime_error(
+                      "gather_nif: index " + std::to_string(gather_coords[ax]) +
+                      " out of bounds for tensor axis " +
+                      std::to_string(tensor_ax) + " with size " +
+                      std::to_string(tensor->shape[tensor_ax]));
+                }
+              }
+
+              // For each combination of non-gathered dimensions
+              for (size_t ng_linear = 0; ng_linear < non_gathered_size;
+                   ++ng_linear) {
+                // Build full tensor coordinates
+                std::vector<int64_t> tensor_coords(tensor_rank);
+
+                // Decode non-gathered linear index to coordinates for
+                // non-gathered axes
+                size_t temp = ng_linear;
+                for (int i = (int)non_gathered_dims.size() - 1; i >= 0; --i) {
+                  int tensor_ax = non_gathered_axes[i];
+                  tensor_coords[tensor_ax] = temp % non_gathered_dims[i];
+                  temp /= non_gathered_dims[i];
+                }
+
+                // Set gathered coordinates
+                for (int ax = 0; ax < num_index_axes; ++ax) {
+                  tensor_coords[axis + ax] = gather_coords[ax];
+                }
+
+                // Encode to input linear index
+                size_t in_linear = 0;
+                for (int d = 0; d < tensor_rank; ++d) {
+                  in_linear += tensor_coords[d] * tensor_strides[d];
+                }
+
+                // Bounds check
+                if (in_linear >= tensor_arr.size()) {
+                  throw std::runtime_error(
+                      "gather_nif: computed input index " +
+                      std::to_string(in_linear) + " out of bounds (size: " +
+                      std::to_string(tensor_arr.size()) + ")");
+                }
+
+                size_t out_idx = idx_tuple_idx * non_gathered_size + ng_linear;
+                if (out_idx >= total_out) {
+                  throw std::runtime_error(
+                      "gather_nif: computed output index " +
+                      std::to_string(out_idx) + " out of bounds (size: " +
+                      std::to_string(total_out) + ")");
+                }
+
+                out_arr[out_idx] = tensor_arr[in_linear];
+              }
+            }
+          },
+          tensor->data);
     }
 
-  // Calculate output strides
-  std::vector<size_t> output_strides(rank);
-  stride = 1;
-  for (int i = rank - 1; i >= 0; --i) {
-    output_strides[i] = stride;
-    stride *= result->shape[i];
-  }
-
-  std::visit(
-      [&](auto &tensor_arr) {
-        using T = typename std::decay_t<decltype(tensor_arr)>::Scalar;
-        auto &out_arr = result->data.emplace<FlatArray<T>>();
-        out_arr.resize(total_out);
-
-        // Iterate through output and map to input using indices
-        for (size_t out_linear = 0; out_linear < total_out; ++out_linear) {
-          // Decode output linear index to coordinates
-          std::vector<size_t> out_coords(rank);
-          size_t temp = out_linear;
-          for (int d = rank - 1; d >= 0; --d) {
-            out_coords[d] = temp % result->shape[d];
-            temp /= result->shape[d];
-          }
-
-          // Map to input coordinates using indices at the gather axis
-          std::vector<size_t> in_coords = out_coords;
-          size_t idx_pos = out_coords[axis];
-
-          // Bounds check on indices array access
-          if (idx_pos >= idx_vec.size()) {
-            throw std::runtime_error("gather_nif: index position " +
-                                     std::to_string(idx_pos) +
-                                     " out of bounds for indices array size " +
-                                     std::to_string(idx_vec.size()));
-          }
-
-          int64_t gathered_idx = idx_vec[idx_pos];
-
-          // Bounds check on gathered index
-          if (gathered_idx < 0 || gathered_idx >= tensor->shape[axis]) {
-            throw std::runtime_error(
-                "gather_nif: gathered index " + std::to_string(gathered_idx) +
-                " out of bounds for axis " + std::to_string(axis) +
-                " with size " + std::to_string(tensor->shape[axis]));
-          }
-
-          in_coords[axis] = gathered_idx;
-
-          // Encode input coordinates to linear index
-          size_t in_linear = 0;
-          for (int d = 0; d < rank; ++d) {
-            in_linear += in_coords[d] * tensor_strides[d];
-          }
-
-          // Bounds check on input array access
-          if (in_linear >= tensor_arr.size()) {
-            throw std::runtime_error("gather_nif: computed input index " +
-                                     std::to_string(in_linear) +
-                                     " out of bounds (size: " +
-                                     std::to_string(tensor_arr.size()) + ")");
-          }
-
-          out_arr[out_linear] = tensor_arr[in_linear];
-        }
-      },
-      tensor->data);
-
-  return result;
+    return result;
   } catch (const std::exception &e) {
     throw std::runtime_error(std::string("gather_nif error: ") + e.what());
   }
@@ -3232,6 +4962,41 @@ dot_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
 
   int left_rank = left->shape.size();
   int right_rank = right->shape.size();
+
+  // Special case: 1D x 1D vector dot product (inner product)
+  if (left_rank == 1 && right_rank == 1 && batch_axes1.empty() &&
+      batch_axes2.empty() && contract_axes1.size() == 1 &&
+      contract_axes2.size() == 1 && contract_axes1[0] == 0 &&
+      contract_axes2[0] == 0) {
+    // This is a simple dot product: sum(left[i] * right[i])
+    int64_t N = left->shape[0];
+
+    result->shape = {}; // Scalar result
+
+    try {
+      std::visit(
+          [&](auto &left_arr) {
+            using T = typename std::decay_t<decltype(left_arr)>::Scalar;
+            auto &right_arr = std::get<FlatArray<T>>(right->data);
+            auto &out_arr = result->data.emplace<FlatArray<T>>();
+            out_arr.resize(1);
+
+            // Use Eigen's dot product
+            Eigen::Map<Eigen::Matrix<T, Eigen::Dynamic, 1>> left_vec(
+                left_arr.data(), N);
+            Eigen::Map<Eigen::Matrix<T, Eigen::Dynamic, 1>> right_vec(
+                right_arr.data(), N);
+
+            out_arr[0] = left_vec.dot(right_vec);
+          },
+          left->data);
+    } catch (const std::bad_variant_access &e) {
+      throw std::runtime_error(
+          "Type mismatch in dot product - tensors must have the same type");
+    }
+
+    return result;
+  }
 
   // Simple case: 2D x 2D matrix multiplication with no batch dimensions
   if (left_rank == 2 && right_rank == 2 && batch_axes1.empty() &&
@@ -3486,3 +5251,173 @@ dot_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
   return result;
 }
 FINE_NIF(dot_nif, 0);
+
+// Triangular Solve operation
+// Solves the system A*X = B or X*A = B where A is triangular
+fine::ResourcePtr<EigenTensor>
+triangular_solve_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> a,
+                     fine::ResourcePtr<EigenTensor> b, bool lower,
+                     bool left_side, int64_t transform_a) {
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = b->shape;
+
+    // Get matrix dimensions
+    size_t a_rows = a->shape[a->shape.size() - 2];
+    size_t a_cols = a->shape[a->shape.size() - 1];
+    size_t b_rows = b->shape[b->shape.size() - 2];
+    size_t b_cols = b->shape[b->shape.size() - 1];
+
+    // Validate that A is square
+    if (a_rows != a_cols) {
+      throw std::runtime_error("triangular_solve: matrix A must be square");
+    }
+
+    // Calculate batch info
+    size_t a_matrix_size = a_rows * a_cols;
+    size_t b_matrix_size = b_rows * b_cols;
+    size_t a_total_size = 1;
+    for (auto s : a->shape)
+      a_total_size *= s;
+    size_t b_total_size = 1;
+    for (auto s : b->shape)
+      b_total_size *= s;
+
+    if (a_total_size == 0 || b_total_size == 0) {
+      std::visit(
+          [&](auto &b_arr) {
+            using T = typename std::decay_t<decltype(b_arr)>::Scalar;
+            result->data.emplace<FlatArray<T>>();
+          },
+          b->data);
+      return result;
+    }
+
+    size_t num_batches = a_total_size / a_matrix_size;
+    if (b_total_size / b_matrix_size != num_batches) {
+      throw std::runtime_error("triangular_solve: batch size mismatch");
+    }
+
+    std::visit(
+        [&](auto &a_arr) {
+          using T = typename std::decay_t<decltype(a_arr)>::Scalar;
+
+          std::visit(
+              [&](auto &b_arr) {
+                using BT = typename std::decay_t<decltype(b_arr)>::Scalar;
+
+                // Ensure both matrices have the same scalar type
+                if constexpr (std::is_same_v<T, BT>) {
+                  auto &res_arr = result->data.emplace<FlatArray<T>>();
+                  res_arr.resize(b_total_size);
+
+                  using Matrix = Eigen::Matrix<T, Eigen::Dynamic,
+                                               Eigen::Dynamic, Eigen::RowMajor>;
+
+                  for (size_t batch_idx = 0; batch_idx < num_batches;
+                       ++batch_idx) {
+                    size_t a_offset = batch_idx * a_matrix_size;
+                    size_t b_offset = batch_idx * b_matrix_size;
+
+                    Eigen::Map<const Matrix> a_mat(a_arr.data() + a_offset,
+                                                   a_rows, a_cols);
+                    Eigen::Map<const Matrix> b_mat(b_arr.data() + b_offset,
+                                                   b_rows, b_cols);
+
+                    Matrix x;
+
+                    if (left_side) {
+                      // Solve A*X = B
+                      if (transform_a == 0) {
+                        // No transformation
+                        if (lower) {
+                          x = a_mat.template triangularView<Eigen::Lower>()
+                                  .solve(b_mat);
+                        } else {
+                          x = a_mat.template triangularView<Eigen::Upper>()
+                                  .solve(b_mat);
+                        }
+                      } else if (transform_a == 1) {
+                        // Transpose
+                        if (lower) {
+                          x = a_mat.transpose()
+                                  .template triangularView<Eigen::Upper>()
+                                  .solve(b_mat);
+                        } else {
+                          x = a_mat.transpose()
+                                  .template triangularView<Eigen::Lower>()
+                                  .solve(b_mat);
+                        }
+                      } else if (transform_a == 2) {
+                        // Adjoint (conjugate transpose)
+                        if (lower) {
+                          x = a_mat.adjoint()
+                                  .template triangularView<Eigen::Upper>()
+                                  .solve(b_mat);
+                        } else {
+                          x = a_mat.adjoint()
+                                  .template triangularView<Eigen::Lower>()
+                                  .solve(b_mat);
+                        }
+                      }
+                    } else {
+                      // Solve X*A = B, which is equivalent to A^T*X^T = B^T
+                      Matrix b_t = b_mat.transpose();
+                      Matrix x_t;
+
+                      if (transform_a == 0) {
+                        // No transformation
+                        if (lower) {
+                          x_t = a_mat.transpose()
+                                    .template triangularView<Eigen::Upper>()
+                                    .solve(b_t);
+                        } else {
+                          x_t = a_mat.transpose()
+                                    .template triangularView<Eigen::Lower>()
+                                    .solve(b_t);
+                        }
+                      } else if (transform_a == 1) {
+                        // Transpose
+                        if (lower) {
+                          x_t = a_mat.template triangularView<Eigen::Lower>()
+                                    .solve(b_t);
+                        } else {
+                          x_t = a_mat.template triangularView<Eigen::Upper>()
+                                    .solve(b_t);
+                        }
+                      } else if (transform_a == 2) {
+                        // Adjoint (conjugate transpose)
+                        if (lower) {
+                          x_t = a_mat.conjugate()
+                                    .template triangularView<Eigen::Lower>()
+                                    .solve(b_t);
+                        } else {
+                          x_t = a_mat.conjugate()
+                                    .template triangularView<Eigen::Upper>()
+                                    .solve(b_t);
+                        }
+                      }
+
+                      x = x_t.transpose();
+                    }
+
+                    // Copy result to flat array
+                    Eigen::Map<Matrix>(res_arr.data() + b_offset, b_rows,
+                                       b_cols) = x;
+                  }
+                } else {
+                  throw std::runtime_error(
+                      "triangular_solve: type mismatch between A and B");
+                }
+              },
+              b->data);
+        },
+        a->data);
+
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("triangular_solve_nif error: ") +
+                             e.what());
+  }
+}
+FINE_NIF(triangular_solve_nif, 0);
