@@ -7,6 +7,21 @@ defmodule NxEigen.LinAlgTest do
     :ok
   end
 
+  @rounding_error_linalg [
+    cholesky: 1,
+    determinant: 1,
+    matrix_power: 2,
+    svd: 2,
+    pinv: 2,
+    norm: 2,
+    lu: 2,
+    least_squares: 3,
+    triangular_solve: 3,
+    solve: 2
+  ]
+
+  doctest Nx.LinAlg, except: @rounding_error_linalg
+
   describe "cholesky" do
     test "basic cholesky" do
       t = Nx.tensor([[20.0, 17.6], [17.6, 16.0]])
