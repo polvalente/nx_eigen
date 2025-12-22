@@ -45,24 +45,19 @@ defmodule NxEigen.DocTest do
     ]
 
   @rounding_error_linalg [
-    cholesky: 1
+    cholesky: 1,
+    determinant: 1,
+    matrix_power: 2,
+    svd: 2,
+    pinv: 2,
+    norm: 2,
+    lu: 2,
+    least_squares: 3
   ]
 
   doctest Nx.LinAlg,
-    except: @rounding_error_linalg ++ [
-      # invert: 1,
-      matrix_power: 2,
-      determinant: 1,
-      least_squares: 3,
-      qr: 2,
-      svd: 2,
-      pinv: 2,
+  except: @rounding_error_linalg ++ [
       solve: 2,
-      matrix_rank: 2,
-      norm: 2,
-      eigh: 2,
-      lu: 2,
-      triangular_solve: 3,
-      adjoint: 2
+      triangular_solve: 3
     ]
 end
