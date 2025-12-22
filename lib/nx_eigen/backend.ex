@@ -31,13 +31,10 @@ defmodule NxEigen.Backend do
 
   @impl true
   def constant(out, value, _backend_opts) do
-    # Handle complex numbers properly
-    val = case value do
-      %Complex{re: r, im: i} -> {r, i}
-      n when is_number(n) -> n
-      _ -> raise ArgumentError, "constant value must be a number or Complex, got: #{inspect(value)}"
-    end
-    state = NxEigen.NIF.constant(out.type, out.shape, val)
+    # TODO: create from value directly
+    scalar_tensor = Nx.tensor(value, type: out.type, backend: Nx.BinaryBackend)
+    scalar_state = NxEigen.NIF.from_binary(Nx.to_binary(scalar_tensor), scalar_tensor.type, {})
+    state = NxEigen.NIF.constant(out.type, out.shape, scalar_state)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
@@ -160,6 +157,10 @@ defmodule NxEigen.Backend do
 
   @impl true
   def select(out, pred, on_true, on_false) do
+    # Ensure all inputs are on NxEigen backend
+    pred = ensure_backend(pred)
+    on_true = ensure_backend(on_true)
+    on_false = ensure_backend(on_false)
     # Ensure on_true and on_false have the same type
     on_true = maybe_upcast(on_true, out.type)
     on_false = maybe_upcast(on_false, out.type)
@@ -167,12 +168,17 @@ defmodule NxEigen.Backend do
     pred = maybe_broadcast(pred, out.shape)
     on_true = maybe_broadcast(on_true, out.shape)
     on_false = maybe_broadcast(on_false, out.shape)
+
     state = NxEigen.NIF.select(pred.data.state, on_true.data.state, on_false.data.state)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end
 
   @impl true
   def gather(out, tensor, indices, opts) do
+    # Ensure both tensors are on NxEigen backend
+    tensor = ensure_backend(tensor)
+    indices = ensure_backend(indices)
+
     axes = opts[:axes] || [0]
 
     # Extract the axis to gather from
@@ -187,6 +193,9 @@ defmodule NxEigen.Backend do
   # Linear Algebra
   @impl true
   def dot(out, left, contract_axes1, batch_axes1, right, contract_axes2, batch_axes2) do
+    # Ensure both tensors are on NxEigen backend
+    left = ensure_backend(left)
+    right = ensure_backend(right)
     # Convert inputs to output type if needed
     left = if left.type != out.type, do: Nx.as_type(left, out.type), else: left
     right = if right.type != out.type, do: Nx.as_type(right, out.type), else: right
@@ -204,6 +213,21 @@ defmodule NxEigen.Backend do
 
   @impl true
   def triangular_solve(out, a, b, opts) do
+    # Ensure both tensors are on NxEigen backend
+    a = ensure_backend(a)
+    b = ensure_backend(b)
+
+    # Broadcast b to output shape (handles batch broadcasting)
+    b = maybe_broadcast(b, out.shape)
+
+    # Broadcast a to match output batch dimensions
+    # a shape is [..., M, M], out shape is [..., M, N]
+    # We want a to have shape [..., M, M] where ... matches out's batch dims
+    batch_dims = Tuple.to_list(out.shape) |> Enum.reverse() |> Enum.drop(2) |> Enum.reverse()
+    a_matrix_dims = Tuple.to_list(a.shape) |> Enum.reverse() |> Enum.take(2) |> Enum.reverse()
+    target_a_shape = List.to_tuple(batch_dims ++ a_matrix_dims)
+    a = maybe_broadcast(a, target_a_shape)
+
     lower = Keyword.get(opts, :lower, true)
     left_side = Keyword.get(opts, :left_side, true)
     transform_a = case Keyword.get(opts, :transform_a, :none) do
@@ -243,6 +267,9 @@ defmodule NxEigen.Backend do
   for op <- @bitwise_ops do
     @impl true
     def unquote(op)(out, l, r) do
+      # Ensure both tensors are on NxEigen backend
+      l = ensure_backend(l)
+      r = ensure_backend(r)
       # Broadcast to output shape
       l = maybe_broadcast(l, out.shape)
       r = maybe_broadcast(r, out.shape)
@@ -290,6 +317,9 @@ defmodule NxEigen.Backend do
   end
 
   defp maybe_upcast(tensor, type) do
+    # First ensure tensor is on NxEigen backend
+    tensor = ensure_backend(tensor)
+
     if tensor.type == type do
       tensor
     else
@@ -298,13 +328,20 @@ defmodule NxEigen.Backend do
     end
   end
 
+  defp ensure_backend(%Nx.Tensor{data: %__MODULE__{}} = tensor), do: tensor
+  defp ensure_backend(tensor) do
+    # Convert tensor from other backend to NxEigen backend
+    binary = Nx.to_binary(tensor)
+    from_binary(%{tensor | data: %__MODULE__{}}, binary, [])
+  end
+
   defp maybe_broadcast(tensor, target_shape) do
     if tensor.shape == target_shape do
       tensor
     else
-      # Need to broadcast - calculate broadcast axes
+      # Need to broadcast - calculate broadcast axes and call our backend's broadcast
       axes = Nx.Shape.broadcast_axes(tensor.shape, target_shape)
-      out = Nx.template(target_shape, tensor.type)
+      out = %{tensor | shape: target_shape}
       broadcast(out, tensor, target_shape, axes)
     end
   end
@@ -573,6 +610,8 @@ defmodule NxEigen.Backend do
   def indexed_add(out, tensor, indices, updates, opts) do
     # Extract axes from opts keyword list
     axes = Keyword.get(opts, :axes, [])
+    # Ensure all tensors are on NxEigen backend
+    indices = ensure_backend(indices)
     # Ensure tensor and updates have the same type as output
     tensor = maybe_upcast(tensor, out.type)
     updates = maybe_upcast(updates, out.type)
@@ -584,6 +623,8 @@ defmodule NxEigen.Backend do
   def indexed_put(out, tensor, indices, updates, opts) do
     # Extract axes from opts keyword list
     axes = Keyword.get(opts, :axes, [])
+    # Ensure all tensors are on NxEigen backend
+    indices = ensure_backend(indices)
     # Ensure tensor and updates have the same type as output
     tensor = maybe_upcast(tensor, out.type)
     updates = maybe_upcast(updates, out.type)
@@ -681,6 +722,9 @@ defmodule NxEigen.Backend do
   # Convolution
   @impl true
   def conv(out, tensor, kernel, opts) do
+    # Ensure both tensors are on NxEigen backend
+    tensor = ensure_backend(tensor)
+    kernel = ensure_backend(kernel)
     state = NxEigen.NIF.conv(tensor.data.state, kernel.data.state, opts)
     %{out | data: %__MODULE__{state: state, id: make_ref()}}
   end

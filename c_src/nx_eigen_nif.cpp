@@ -2,6 +2,7 @@
 #include <complex>
 #include <fftw3.h>
 #include <fine.hpp>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -643,8 +644,19 @@ abs_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor) {
   std::visit(
       [&](auto &mat) {
         using T = typename std::decay_t<decltype(mat)>;
-        auto &res_mat = result->data.emplace<T>();
-        res_mat = mat.abs();
+        using Scalar = typename T::Scalar;
+
+        if constexpr (Eigen::NumTraits<Scalar>::IsComplex) {
+          // For complex types, abs returns real values
+          using RealScalar = typename Eigen::NumTraits<Scalar>::Real;
+          using RealArray = FlatArray<RealScalar>;
+          auto &res_mat = result->data.emplace<RealArray>();
+          res_mat = mat.abs();
+        } else {
+          // For real and integer types, abs returns the same type
+          auto &res_mat = result->data.emplace<T>();
+          res_mat = mat.abs();
+        }
       },
       tensor->data);
   return result;
@@ -2087,6 +2099,18 @@ template <> struct Decoder<ConstantValue> {
       return ConstantValue(static_cast<double>(ival));
     }
 
+    // Try as atom (for infinity/nan)
+    char atom_buf[256];
+    if (enif_get_atom(env, term, atom_buf, sizeof(atom_buf), ERL_NIF_LATIN1)) {
+      std::string atom(atom_buf);
+      if (atom == "infinity")
+        return ConstantValue(std::numeric_limits<double>::infinity());
+      if (atom == "neg_infinity")
+        return ConstantValue(-std::numeric_limits<double>::infinity());
+      if (atom == "nan")
+        return ConstantValue(std::numeric_limits<double>::quiet_NaN());
+    }
+
     throw std::runtime_error("Failed to decode ConstantValue");
   }
 };
@@ -3440,10 +3464,24 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
 static auto __nif_registration_conv =
     fine::Registration::register_nif({"conv_nif", 3, conv_nif, 0});
 
+// Helper to check for complex type
+template <typename T> struct is_complex : std::false_type {};
+template <typename T> struct is_complex<std::complex<T>> : std::true_type {};
+template <typename T> inline constexpr bool is_complex_v = is_complex<T>::value;
+
+// Helper to get value type safely
+template <typename T> struct complex_value_type {
+  using type = T;
+};
+
+template <typename T> struct complex_value_type<std::complex<T>> {
+  using type = T;
+};
+
 // Constant/Eye/Iota
-fine::ResourcePtr<EigenTensor> constant_nif(ErlNifEnv *env, ScalarType type,
-                                            std::vector<int64_t> shape,
-                                            ConstantValue value) {
+fine::ResourcePtr<EigenTensor>
+constant_nif(ErlNifEnv *env, ScalarType type, std::vector<int64_t> shape,
+             fine::ResourcePtr<EigenTensor> value_tensor) {
   auto tensor = fine::make_resource<EigenTensor>();
   tensor->shape = shape;
 
@@ -3456,12 +3494,52 @@ fine::ResourcePtr<EigenTensor> constant_nif(ErlNifEnv *env, ScalarType type,
     auto &arr = tensor->data.emplace<FlatArray<Scalar>>();
     arr.resize(num_elements);
 
-    // Handle complex vs real types
-    if constexpr (Eigen::NumTraits<Scalar>::IsComplex) {
-      arr.setConstant(Scalar(value.real, value.imag));
-    } else {
-      arr.setConstant(static_cast<Scalar>(value.real));
-    }
+    // Get value from scalar tensor
+    std::visit(
+        [&](auto &val_arr) {
+          using ValScalar = typename std::decay_t<decltype(val_arr)>::Scalar;
+
+          if (val_arr.size() != 1) {
+            throw std::runtime_error("constant value must be a scalar tensor");
+          }
+
+          Scalar val;
+          if constexpr (std::is_same_v<Scalar, ValScalar>) {
+            val = val_arr[0];
+          } else if constexpr (std::is_arithmetic_v<Scalar> &&
+                               std::is_arithmetic_v<ValScalar>) {
+            val = static_cast<Scalar>(val_arr[0]);
+          } else {
+            if constexpr (is_complex_v<Scalar>) {
+              if constexpr (is_complex_v<ValScalar>) {
+                using T = typename complex_value_type<Scalar>::type;
+                T r = static_cast<T>(val_arr[0].real());
+                T i = static_cast<T>(val_arr[0].imag());
+                val = Scalar(r, i);
+              } else {
+                // Complex from Real
+                using T = typename complex_value_type<Scalar>::type;
+                val = Scalar(static_cast<T>(val_arr[0]));
+              }
+            } else {
+              // Scalar is Real
+              if constexpr (is_complex_v<ValScalar>) {
+                // Real from Complex
+                val = static_cast<Scalar>(val_arr[0].real());
+              } else {
+                // Real from Real
+                if constexpr (std::is_constructible_v<Scalar, ValScalar>) {
+                  val = static_cast<Scalar>(val_arr[0]);
+                } else {
+                  val = {};
+                }
+              }
+            }
+          }
+
+          arr.setConstant(val);
+        },
+        value_tensor->data);
   };
 
   switch (type) {
@@ -5173,3 +5251,173 @@ dot_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
   return result;
 }
 FINE_NIF(dot_nif, 0);
+
+// Triangular Solve operation
+// Solves the system A*X = B or X*A = B where A is triangular
+fine::ResourcePtr<EigenTensor>
+triangular_solve_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> a,
+                     fine::ResourcePtr<EigenTensor> b, bool lower,
+                     bool left_side, int64_t transform_a) {
+  try {
+    auto result = fine::make_resource<EigenTensor>();
+    result->shape = b->shape;
+
+    // Get matrix dimensions
+    size_t a_rows = a->shape[a->shape.size() - 2];
+    size_t a_cols = a->shape[a->shape.size() - 1];
+    size_t b_rows = b->shape[b->shape.size() - 2];
+    size_t b_cols = b->shape[b->shape.size() - 1];
+
+    // Validate that A is square
+    if (a_rows != a_cols) {
+      throw std::runtime_error("triangular_solve: matrix A must be square");
+    }
+
+    // Calculate batch info
+    size_t a_matrix_size = a_rows * a_cols;
+    size_t b_matrix_size = b_rows * b_cols;
+    size_t a_total_size = 1;
+    for (auto s : a->shape)
+      a_total_size *= s;
+    size_t b_total_size = 1;
+    for (auto s : b->shape)
+      b_total_size *= s;
+
+    if (a_total_size == 0 || b_total_size == 0) {
+      std::visit(
+          [&](auto &b_arr) {
+            using T = typename std::decay_t<decltype(b_arr)>::Scalar;
+            result->data.emplace<FlatArray<T>>();
+          },
+          b->data);
+      return result;
+    }
+
+    size_t num_batches = a_total_size / a_matrix_size;
+    if (b_total_size / b_matrix_size != num_batches) {
+      throw std::runtime_error("triangular_solve: batch size mismatch");
+    }
+
+    std::visit(
+        [&](auto &a_arr) {
+          using T = typename std::decay_t<decltype(a_arr)>::Scalar;
+
+          std::visit(
+              [&](auto &b_arr) {
+                using BT = typename std::decay_t<decltype(b_arr)>::Scalar;
+
+                // Ensure both matrices have the same scalar type
+                if constexpr (std::is_same_v<T, BT>) {
+                  auto &res_arr = result->data.emplace<FlatArray<T>>();
+                  res_arr.resize(b_total_size);
+
+                  using Matrix = Eigen::Matrix<T, Eigen::Dynamic,
+                                               Eigen::Dynamic, Eigen::RowMajor>;
+
+                  for (size_t batch_idx = 0; batch_idx < num_batches;
+                       ++batch_idx) {
+                    size_t a_offset = batch_idx * a_matrix_size;
+                    size_t b_offset = batch_idx * b_matrix_size;
+
+                    Eigen::Map<const Matrix> a_mat(a_arr.data() + a_offset,
+                                                   a_rows, a_cols);
+                    Eigen::Map<const Matrix> b_mat(b_arr.data() + b_offset,
+                                                   b_rows, b_cols);
+
+                    Matrix x;
+
+                    if (left_side) {
+                      // Solve A*X = B
+                      if (transform_a == 0) {
+                        // No transformation
+                        if (lower) {
+                          x = a_mat.template triangularView<Eigen::Lower>()
+                                  .solve(b_mat);
+                        } else {
+                          x = a_mat.template triangularView<Eigen::Upper>()
+                                  .solve(b_mat);
+                        }
+                      } else if (transform_a == 1) {
+                        // Transpose
+                        if (lower) {
+                          x = a_mat.transpose()
+                                  .template triangularView<Eigen::Upper>()
+                                  .solve(b_mat);
+                        } else {
+                          x = a_mat.transpose()
+                                  .template triangularView<Eigen::Lower>()
+                                  .solve(b_mat);
+                        }
+                      } else if (transform_a == 2) {
+                        // Adjoint (conjugate transpose)
+                        if (lower) {
+                          x = a_mat.adjoint()
+                                  .template triangularView<Eigen::Upper>()
+                                  .solve(b_mat);
+                        } else {
+                          x = a_mat.adjoint()
+                                  .template triangularView<Eigen::Lower>()
+                                  .solve(b_mat);
+                        }
+                      }
+                    } else {
+                      // Solve X*A = B, which is equivalent to A^T*X^T = B^T
+                      Matrix b_t = b_mat.transpose();
+                      Matrix x_t;
+
+                      if (transform_a == 0) {
+                        // No transformation
+                        if (lower) {
+                          x_t = a_mat.transpose()
+                                    .template triangularView<Eigen::Upper>()
+                                    .solve(b_t);
+                        } else {
+                          x_t = a_mat.transpose()
+                                    .template triangularView<Eigen::Lower>()
+                                    .solve(b_t);
+                        }
+                      } else if (transform_a == 1) {
+                        // Transpose
+                        if (lower) {
+                          x_t = a_mat.template triangularView<Eigen::Lower>()
+                                    .solve(b_t);
+                        } else {
+                          x_t = a_mat.template triangularView<Eigen::Upper>()
+                                    .solve(b_t);
+                        }
+                      } else if (transform_a == 2) {
+                        // Adjoint (conjugate transpose)
+                        if (lower) {
+                          x_t = a_mat.conjugate()
+                                    .template triangularView<Eigen::Lower>()
+                                    .solve(b_t);
+                        } else {
+                          x_t = a_mat.conjugate()
+                                    .template triangularView<Eigen::Upper>()
+                                    .solve(b_t);
+                        }
+                      }
+
+                      x = x_t.transpose();
+                    }
+
+                    // Copy result to flat array
+                    Eigen::Map<Matrix>(res_arr.data() + b_offset, b_rows,
+                                       b_cols) = x;
+                  }
+                } else {
+                  throw std::runtime_error(
+                      "triangular_solve: type mismatch between A and B");
+                }
+              },
+              b->data);
+        },
+        a->data);
+
+    return result;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("triangular_solve_nif error: ") +
+                             e.what());
+  }
+}
+FINE_NIF(triangular_solve_nif, 0);

@@ -19,13 +19,13 @@ defmodule NxEigen.DocTest do
       sigil_VEC: 2,
   ]
 
-  @precision_sensitive [
+  @rounding_error [
       # These tests fail due to minor floating point precision differences
       erf_inv: 1,
       expm1: 1,
       sigmoid: 1,
-      tanh: 1
-  ]
+      tanh: 1,
+    ]
 
   @unsupported_ops [
     reduce: 4,
@@ -40,14 +40,17 @@ defmodule NxEigen.DocTest do
   # Run Nx's own doctests with NxEigen backend
   # This ensures full compatibility with Nx's documented behavior
   doctest Nx,
-    except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ @unsupported_ops ++ [
+    except: @unsupported_types ++ @rounding_error ++ @sub_byte_types ++ @unsupported_ops ++ [
       :moduledoc
     ]
 
+  @rounding_error_linalg [
+    cholesky: 1
+  ]
+
   doctest Nx.LinAlg,
-    except: [
-      cholesky: 1,
-      invert: 1,
+    except: @rounding_error_linalg ++ [
+      # invert: 1,
       matrix_power: 2,
       determinant: 1,
       least_squares: 3,
