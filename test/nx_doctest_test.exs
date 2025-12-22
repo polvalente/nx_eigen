@@ -41,11 +41,7 @@ defmodule NxEigen.DocTest do
   # This ensures full compatibility with Nx's documented behavior
   doctest Nx,
     except: @unsupported_types ++ @precision_sensitive ++ @sub_byte_types ++ @unsupported_ops ++ [
-      :moduledoc,
-      # Statistical functions
-      mode: 2,  # Has slice stride edge cases
-      variance: 2,  # Broadcast issue with mean result
-      standard_deviation: 2
+      :moduledoc
     ]
 
   doctest Nx.LinAlg,

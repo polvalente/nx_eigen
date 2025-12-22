@@ -95,6 +95,9 @@ defmodule NxEigen.Backend do
       # Upcast to output type if needed (e.g., s8 -> s32 for sum)
       tensor = maybe_upcast(tensor, out.type)
       state = apply(NxEigen.NIF, unquote(op), [tensor.data.state, axes])
+      # If keep_axes is true, the NIF returns a tensor with reduced dimensions,
+      # but we need to reshape it to match out.shape (which has size-1 dimensions)
+      state = if opts[:keep_axes], do: NxEigen.NIF.reshape(state, out.shape), else: state
       %{out | data: %__MODULE__{state: state, id: make_ref()}}
     end
   end
@@ -107,6 +110,8 @@ defmodule NxEigen.Backend do
       # If axes is nil, reduce over all dimensions
       axes = opts[:axes] || Nx.axes(tensor)
       state = apply(NxEigen.NIF, unquote(op), [tensor.data.state, axes])
+      # If keep_axes is true, reshape to match out.shape
+      state = if opts[:keep_axes], do: NxEigen.NIF.reshape(state, out.shape), else: state
       %{out | data: %__MODULE__{state: state, id: make_ref()}}
     end
   end
@@ -121,6 +126,8 @@ defmodule NxEigen.Backend do
       tie_break = opts[:tie_break] || :low
       tie_break_val = if tie_break == :high, do: 1, else: 0
       state = apply(NxEigen.NIF, unquote(op), [tensor.data.state, axis_val, tie_break_val])
+      # If keep_axes is true, reshape to match out.shape
+      state = if opts[:keep_axes], do: NxEigen.NIF.reshape(state, out.shape), else: state
       # NIF returns int64, but we need to convert to the requested output type
       result = %{out | data: %__MODULE__{state: state, id: make_ref()}, type: {:s, 64}}
       if out.type != {:s, 64} do
