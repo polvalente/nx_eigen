@@ -25,3 +25,4 @@ nx_eigen-*.tar
 /eigen-*
 /fftw-*
 /priv/libnx_eigen.so
+/cmake

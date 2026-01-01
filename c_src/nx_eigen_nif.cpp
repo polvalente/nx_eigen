@@ -1,6 +1,8 @@
 #include <Eigen/Dense>
 #include <complex>
+#ifndef NX_EIGEN_DISABLE_FFTW
 #include <fftw3.h>
+#endif
 #include <fine.hpp>
 #include <limits>
 #include <string>
@@ -2886,6 +2888,7 @@ fine::ResourcePtr<EigenTensor> window_scatter_min_nif(
 FINE_NIF(window_scatter_min_nif, 0);
 
 // FFT operations using FFTW (if available)
+#ifndef NX_EIGEN_DISABLE_FFTW
 fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
                                        fine::ResourcePtr<EigenTensor> tensor,
                                        int64_t length, int64_t axis) {
@@ -3111,6 +3114,31 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   return result;
 }
 FINE_NIF(ifft_nif, 0);
+#else
+fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
+                                       fine::ResourcePtr<EigenTensor> tensor,
+                                       int64_t length, int64_t axis) {
+  (void)env;
+  (void)tensor;
+  (void)length;
+  (void)axis;
+  throw std::runtime_error(
+      "FFTW support is disabled at build time (NX_EIGEN_DISABLE_FFTW)");
+}
+FINE_NIF(fft_nif, 0);
+
+fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
+                                        fine::ResourcePtr<EigenTensor> tensor,
+                                        int64_t length, int64_t axis) {
+  (void)env;
+  (void)tensor;
+  (void)length;
+  (void)axis;
+  throw std::runtime_error(
+      "FFTW support is disabled at build time (NX_EIGEN_DISABLE_FFTW)");
+}
+FINE_NIF(ifft_nif, 0);
+#endif
 
 // Helper function to parse convolution options
 struct ConvOptions {
