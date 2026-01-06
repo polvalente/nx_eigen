@@ -6,7 +6,7 @@ An Elixir Nx backend that binds the [Eigen C++ library](https://eigen.tuxfamily.
 
 - **Complete Nx.Backend implementation** - All required callbacks implemented
 - **Efficient linear algebra** - Uses Eigen's optimized matrix operations
-- **FFT support** - Fast Fourier Transform via FFTW
+- **FFT support** - (temporarily disabled)
 - **All Nx types** - Support for u8-u64, s8-s64, f32/f64, c64/c128
 - **Embedded-friendly** - Bitwise operations, integer math, and efficient memory usage
 - **No template metaprogramming nonsense** - Clean, straightforward C++ implementations
@@ -16,40 +16,18 @@ An Elixir Nx backend that binds the [Eigen C++ library](https://eigen.tuxfamily.
 ### Required
 
 - **Eigen** (≥3.4.0) - C++ template library for linear algebra
-- **FFTW3** - Fast Fourier Transform library
 - **Elixir** (≥1.14)
 - **Erlang/OTP** (≥25)
 
 ### Installation
 
-#### Using System Packages
-
-**macOS:**
-
-```bash
-brew install fftw
-```
-
-**Ubuntu/Debian:**
-
-```bash
-sudo apt-get install libfftw3-dev
-```
-
-**Arch Linux:**
-
-```bash
-sudo pacman -S fftw
-```
-
 #### Using Local Directories
 
-You can specify local installations of Eigen and FFTW:
+You can specify a local installation of Eigen:
 
 ```bash
 # Set environment variables before compiling
 export EIGEN_DIR=/path/to/eigen
-export FFTW_DIR=/path/to/fftw
 
 mix deps.get
 mix compile
@@ -61,7 +39,7 @@ This project builds a NIF (`priv/libnx_eigen.so`) via `make`. For cross-compilat
 
 - **Set a toolchain**: `CROSSCOMPILE` (prefix) or `CXX` (full path)
 - **Set the target OS** (so we don't add macOS-only linker flags): `TARGET_OS=Linux|Darwin`
-- **FFTW note**: by default, when `CROSSCOMPILE` is set we build with `DISABLE_FFTW=1` (so `fft/ifft` are disabled and no FFTW headers/libs are needed). You can override with `DISABLE_FFTW=0 FFTW_DIR=...` if you have FFTW available for the target.
+- **FFT note**: FFT (`fft/ifft`) is currently disabled in the native library build.
 - **(If needed)** override `ERL_INCLUDE_DIR` to a matching Erlang/OTP include directory
 
 Example (toolchain-prefix style):
@@ -73,12 +51,6 @@ export EIGEN_DIR=/path/to/eigen
 
 mix deps.get
 mix compile
-```
-
-If you're setting the compiler directly (and not setting `CROSSCOMPILE`), make sure to also disable FFTW explicitly:
-
-```bash
-DISABLE_FFTW=1 CXX=/path/to/aarch64-linux-gnu-g++ TARGET_OS=Linux SKIP_DOWNLOADS=1 mix compile
 ```
 
 If you already have a CMake toolchain file, you can also build via CMake:
@@ -95,13 +67,12 @@ Key requirements:
 
 - The `.so` must be built for **Linux/aarch64**
 - You must compile against the target's **Erlang/OTP NIF headers** (matching the target OTP version)
-- The target must have **FFTW runtime** installed (or you must ship it alongside the `.so`)
 
 On the **target** (Debian arm64), install deps:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y erlang-dev libfftw3-dev
+sudo apt-get install -y erlang-dev
 ```
 
 Still on the **target**, print the exact NIF include dir you need:
@@ -126,15 +97,13 @@ Now build the NIF on the **dev machine** using CMake + sysroot:
 
 ```bash
 export ERL_INCLUDE_DIR="$SYSROOT/usr/lib/erlang/erts-<VERSION>/include"
-export FFTW_DIR="$SYSROOT/usr"
 
 make SKIP_DOWNLOADS=1 USE_CMAKE=1 \
   CMAKE_TOOLCHAIN_FILE=cmake/toolchains/aarch64-linux-gnu-sysroot.cmake \
   CMAKE_BUILD_DIR=$PWD/cmake-build-aarch64 \
   CMAKE_BUILD_TYPE=Release \
   CMAKE_ARGS="-DCMAKE_SYSROOT=$SYSROOT" \
-  ERL_INCLUDE_DIR="$ERL_INCLUDE_DIR" \
-  FFTW_DIR="$FFTW_DIR"
+  ERL_INCLUDE_DIR="$ERL_INCLUDE_DIR"
 ```
 
 Finally copy the result to the **target**:
@@ -158,7 +127,6 @@ def project do
     # ...
     make_env: %{
       "EIGEN_DIR" => "/path/to/eigen",
-      "FFTW_DIR" => "/path/to/fftw",
       "CROSSCOMPILE" => "aarch64-linux-gnu-",
       "TARGET_OS" => "Linux"
     }
@@ -201,9 +169,7 @@ a = NxEigen.tensor([[1.0, 2.0], [3.0, 4.0]], type: {:f, 32})
 b = Nx.transpose(a)
 result = Nx.dot(a, b)
 
-# FFT operations (requires FFTW)
-signal = NxEigen.tensor([1.0, 2.0, 3.0, 4.0])
-freq = Nx.fft(signal)
+# FFT operations are currently disabled in the native library build.
 ```
 
 ## Implementation Details
