@@ -95,10 +95,30 @@ fine::ResourcePtr<EigenTensor> from_binary_nif(ErlNifEnv *env,
   auto tensor = fine::make_resource<EigenTensor>();
   tensor->shape = shape;
 
-  // Calculate total elements
+  // Validate shape dimensions
+  for (auto dim : shape) {
+    if (dim < 0) {
+      throw std::runtime_error("Shape dimensions must be non-negative, got: " +
+                               std::to_string(dim));
+    }
+  }
+
+  // Calculate total elements with overflow checking
   size_t num_elements = 1;
-  for (auto dim : shape)
+  for (auto dim : shape) {
+    // Check for overflow before multiplication
+    if (dim > 0 && num_elements > SIZE_MAX / dim) {
+      throw std::runtime_error("Shape dimensions overflow: tensor too large");
+    }
     num_elements *= dim;
+  }
+
+  // Check if num_elements fits in Eigen::Index (signed long)
+  if (num_elements >
+      static_cast<size_t>(std::numeric_limits<Eigen::Index>::max())) {
+    throw std::runtime_error("Tensor size exceeds maximum: " +
+                             std::to_string(num_elements));
+  }
 
   auto init_array = [&](auto scalar_ptr) {
     using Scalar = std::decay_t<decltype(*scalar_ptr)>;
@@ -3036,6 +3056,66 @@ static ConvOptions parse_conv_options(ErlNifEnv *env, ERL_NIF_TERM opts_term) {
   return opts;
 }
 
+// Helper to transpose a flat tensor according to a permutation
+// perm[i] tells us which source dimension goes to destination dimension i
+template <typename Scalar>
+auto transpose_tensor(const FlatArray<Scalar> &src_arr,
+                      const std::vector<int64_t> &src_shape,
+                      const std::vector<int64_t> &perm)
+    -> std::pair<FlatArray<Scalar>, std::vector<int64_t>> {
+  // Compute destination shape
+  std::vector<int64_t> dst_shape(src_shape.size());
+  for (size_t i = 0; i < perm.size(); ++i) {
+    dst_shape[i] = src_shape[perm[i]];
+  }
+
+  // Compute source and destination strides
+  int rank = src_shape.size();
+  std::vector<size_t> src_strides(rank), dst_strides(rank);
+  size_t src_stride = 1, dst_stride = 1;
+  for (int i = rank - 1; i >= 0; --i) {
+    src_strides[i] = src_stride;
+    dst_strides[i] = dst_stride;
+    src_stride *= src_shape[i];
+    dst_stride *= dst_shape[i];
+  }
+
+  size_t total = src_arr.size();
+  FlatArray<Scalar> dst_arr;
+  dst_arr.resize(total);
+
+  // Iterate through all elements
+  std::vector<int64_t> src_coords(rank);
+  std::function<void(int)> iterate_dims;
+  iterate_dims = [&](int dim) {
+    if (dim == rank) {
+      // Compute source index
+      size_t src_idx = 0;
+      for (int i = 0; i < rank; ++i) {
+        src_idx += src_coords[i] * src_strides[i];
+      }
+
+      // Compute destination index by applying permutation
+      size_t dst_idx = 0;
+      for (int i = 0; i < rank; ++i) {
+        // dst dimension i gets value from src dimension perm[i]
+        dst_idx += src_coords[perm[i]] * dst_strides[i];
+      }
+
+      dst_arr[dst_idx] = src_arr[src_idx];
+      return;
+    }
+
+    for (int64_t i = 0; i < src_shape[dim]; ++i) {
+      src_coords[dim] = i;
+      iterate_dims(dim + 1);
+    }
+  };
+
+  iterate_dims(0);
+  return std::make_pair(dst_arr, dst_shape);
+}
+
 // Convolution implementation
 static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
                              const ERL_NIF_TERM argv[]) {
@@ -3061,21 +3141,65 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
       throw std::runtime_error("conv requires at least 3D tensors");
     }
 
-    // Extract dimensions
+    // Helper to compute inverse permutation
+    auto invert_permutation =
+        [](const std::vector<int64_t> &perm) -> std::vector<int64_t> {
+      std::vector<int64_t> inv(perm.size());
+      for (size_t i = 0; i < perm.size(); ++i) {
+        inv[perm[i]] = i;
+      }
+      return inv;
+    };
+
+    // Helper to apply permutation to shape
+    auto permute_shape =
+        [](const std::vector<int64_t> &shape,
+           const std::vector<int64_t> &perm) -> std::vector<int64_t> {
+      std::vector<int64_t> result(shape.size());
+      for (size_t i = 0; i < perm.size(); ++i) {
+        result[i] = shape[perm[i]];
+      }
+      return result;
+    };
+
+    // Get logical shapes by applying permutations to physical shapes
+    // Physical shapes are what's stored in tensor->shape
+    std::vector<int64_t> logical_in_shape =
+        opts.input_permutation.empty()
+            ? tensor->shape
+            : permute_shape(tensor->shape, opts.input_permutation);
+
+    std::vector<int64_t> logical_kernel_shape =
+        opts.kernel_permutation.empty()
+            ? kernel->shape
+            : permute_shape(kernel->shape, opts.kernel_permutation);
+
+    // Compute inverse permutations for index mapping
+    std::vector<int64_t> inv_input_perm =
+        opts.input_permutation.empty()
+            ? std::vector<int64_t>()
+            : invert_permutation(opts.input_permutation);
+
+    std::vector<int64_t> inv_kernel_perm =
+        opts.kernel_permutation.empty()
+            ? std::vector<int64_t>()
+            : invert_permutation(opts.kernel_permutation);
+
+    // Extract dimensions from logical shapes
     // Input: [batch, in_channels, spatial_dims...]
     // Kernel: [out_channels, in_channels/feature_groups, spatial_dims...]
-    int64_t batch_size = tensor->shape[0];
-    int64_t in_channels = tensor->shape[1];
-    int64_t out_channels = kernel->shape[0];
+    int64_t batch_size = logical_in_shape[0];
+    int64_t in_channels = logical_in_shape[1];
+    int64_t out_channels = logical_kernel_shape[0];
 
     int spatial_dims = rank - 2;
 
-    // Calculate output spatial dimensions
-    std::vector<int64_t> out_shape = {batch_size, out_channels};
+    // Calculate output spatial dimensions (in logical space)
+    std::vector<int64_t> logical_out_shape = {batch_size, out_channels};
 
     for (int i = 0; i < spatial_dims; ++i) {
-      int64_t in_size = tensor->shape[i + 2];
-      int64_t kernel_size = kernel->shape[i + 2];
+      int64_t in_size = logical_in_shape[i + 2];
+      int64_t kernel_size = logical_kernel_shape[i + 2];
       int64_t stride = opts.strides.empty() ? 1 : opts.strides[i];
       int64_t input_dil =
           opts.input_dilation.empty() ? 1 : opts.input_dilation[i];
@@ -3093,17 +3217,78 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
           (dilated_in_size + pad_left + pad_right - dilated_kernel_size) /
               stride +
           1;
-      out_shape.push_back(out_size);
+
+      // Validate output dimension
+      if (out_size <= 0) {
+        throw std::runtime_error(
+            "Invalid convolution output dimension " + std::to_string(out_size) +
+            " (spatial dim " + std::to_string(i) +
+            "): " + "input=" + std::to_string(in_size) +
+            ", kernel=" + std::to_string(kernel_size) +
+            ", stride=" + std::to_string(stride) + ", padding=(" +
+            std::to_string(pad_left) + "," + std::to_string(pad_right) + ")");
+      }
+
+      logical_out_shape.push_back(out_size);
     }
 
-    result->shape = out_shape;
+    // Convert logical output shape to physical output shape
+    std::vector<int64_t> physical_out_shape;
+    if (opts.output_permutation.empty()) {
+      physical_out_shape = logical_out_shape;
+    } else {
+      // Apply inverse of output permutation to get physical shape
+      std::vector<int64_t> inv_output_perm =
+          invert_permutation(opts.output_permutation);
+      physical_out_shape = permute_shape(logical_out_shape, inv_output_perm);
+    }
 
-    // Perform convolution - output is always floating point
+    result->shape = physical_out_shape;
+
+    // Transpose input and kernel to canonical layout if needed
+    // Canonical layout: Input [batch, channels, spatial...], Kernel [out_ch,
+    // in_ch, spatial...]
     std::visit(
         [&](auto &tensor_arr) {
           using InputScalar =
               typename std::decay_t<decltype(tensor_arr)>::Scalar;
+
+          // Transpose input to canonical layout if permuted
+          FlatArray<InputScalar> canonical_input_arr;
+          std::vector<int64_t> canonical_input_shape;
+          if (opts.input_permutation.empty()) {
+            canonical_input_arr = tensor_arr;
+            canonical_input_shape = tensor->shape;
+          } else {
+            auto [transposed_arr, transposed_shape] = transpose_tensor(
+                tensor_arr, tensor->shape, opts.input_permutation);
+            canonical_input_arr = std::move(transposed_arr);
+            canonical_input_shape = std::move(transposed_shape);
+          }
+
+          // Transpose kernel to canonical layout if permuted
           auto &kernel_arr = std::get<FlatArray<InputScalar>>(kernel->data);
+          FlatArray<InputScalar> canonical_kernel_arr;
+          std::vector<int64_t> canonical_kernel_shape;
+          if (opts.kernel_permutation.empty()) {
+            canonical_kernel_arr = kernel_arr;
+            canonical_kernel_shape = kernel->shape;
+          } else {
+            auto [transposed_arr, transposed_shape] = transpose_tensor(
+                kernel_arr, kernel->shape, opts.kernel_permutation);
+            canonical_kernel_arr = std::move(transposed_arr);
+            canonical_kernel_shape = std::move(transposed_shape);
+          }
+
+          // NOW WORKING ON CANONICAL LAYOUT
+          // canonical_input_arr and canonical_kernel_arr are already transposed
+          // to canonical layout
+
+          // Extract canonical dimensions
+          int64_t batch_size_can = canonical_input_shape[0];
+          int64_t in_channels_can = canonical_input_shape[1];
+          int64_t out_channels_can = canonical_kernel_shape[0];
+          int64_t kernel_channels_can = canonical_kernel_shape[1];
 
           // Determine output type (floating point version of input)
           using OutputScalar = typename std::conditional<
@@ -3117,59 +3302,81 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
                                         float   // Use float for everything else
                                         >::type>::type;
 
-          auto &out_arr = result->data.emplace<FlatArray<OutputScalar>>();
+          // Calculate canonical output shape
+          std::vector<int64_t> canonical_out_shape = {batch_size_can,
+                                                      out_channels_can};
+          for (int i = 0; i < spatial_dims; ++i) {
+            canonical_out_shape.push_back(logical_out_shape[i + 2]);
+          }
 
-          size_t out_size = 1;
-          for (auto dim : out_shape)
-            out_size *= dim;
-          out_arr.resize(out_size);
-          out_arr.setZero();
+          size_t canonical_out_size = 1;
+          for (auto dim : canonical_out_shape) {
+            if (dim > 0 && canonical_out_size > SIZE_MAX / dim) {
+              throw std::runtime_error(
+                  "Convolution output size overflow: result tensor too large");
+            }
+            canonical_out_size *= dim;
+          }
 
-          // Compute strides for input, kernel, and output
-          std::vector<int64_t> in_strides(rank);
+          if (canonical_out_size >
+              static_cast<size_t>(std::numeric_limits<Eigen::Index>::max())) {
+            throw std::runtime_error(
+                "Convolution output size exceeds maximum: " +
+                std::to_string(canonical_out_size));
+          }
+
+          FlatArray<OutputScalar> canonical_out_arr;
+          canonical_out_arr.resize(canonical_out_size);
+          canonical_out_arr.setZero();
+
+          // Compute strides for canonical layout
+          std::vector<size_t> in_strides(rank);
           in_strides[rank - 1] = 1;
           for (int i = rank - 2; i >= 0; --i) {
-            in_strides[i] = in_strides[i + 1] * tensor->shape[i + 1];
+            in_strides[i] = in_strides[i + 1] * canonical_input_shape[i + 1];
           }
 
-          std::vector<int64_t> kernel_strides(kernel_rank);
+          std::vector<size_t> kernel_strides(kernel_rank);
           kernel_strides[kernel_rank - 1] = 1;
           for (int i = kernel_rank - 2; i >= 0; --i) {
-            kernel_strides[i] = kernel_strides[i + 1] * kernel->shape[i + 1];
+            kernel_strides[i] =
+                kernel_strides[i + 1] * canonical_kernel_shape[i + 1];
           }
 
-          std::vector<int64_t> out_strides(rank);
+          std::vector<size_t> out_strides(rank);
           out_strides[rank - 1] = 1;
           for (int i = rank - 2; i >= 0; --i) {
-            out_strides[i] = out_strides[i + 1] * out_shape[i + 1];
+            out_strides[i] = out_strides[i + 1] * canonical_out_shape[i + 1];
           }
 
-          // Simplified convolution (without groups for now)
-          int64_t kernel_channels = kernel->shape[1];
-
-          // For each output position
-          for (int64_t b = 0; b < batch_size; ++b) {
-            for (int64_t oc = 0; oc < out_channels; ++oc) {
-              // Get output spatial coordinates
-              std::function<void(int, std::vector<int64_t> &)> iterate_spatial;
-              iterate_spatial = [&](int dim, std::vector<int64_t> &out_coords) {
+          // Simplified convolution on canonical layout - no permutation logic
+          // needed
+          for (int64_t b = 0; b < batch_size_can; ++b) {
+            for (int64_t oc = 0; oc < out_channels_can; ++oc) {
+              // Iterate over output spatial dimensions
+              std::function<void(int, std::vector<int64_t> &)>
+                  iterate_out_spatial;
+              iterate_out_spatial = [&](int dim,
+                                        std::vector<int64_t> &out_spatial) {
                 if (dim == spatial_dims) {
-                  // Compute convolution at this output position
+                  // Compute output index
                   size_t out_idx = b * out_strides[0] + oc * out_strides[1];
                   for (int i = 0; i < spatial_dims; ++i) {
-                    out_idx += out_coords[i] * out_strides[i + 2];
+                    out_idx += out_spatial[i] * out_strides[i + 2];
                   }
 
-                  // Sum over kernel
-                  for (int64_t ic = 0; ic < kernel_channels; ++ic) {
+                  // Sum over input channels and kernel spatial dimensions
+                  for (int64_t ic = 0; ic < kernel_channels_can; ++ic) {
+                    // Iterate over kernel spatial dimensions
                     std::function<void(int, std::vector<int64_t> &)>
                         iterate_kernel;
                     iterate_kernel = [&](int kdim,
-                                         std::vector<int64_t> &kcoords) {
+                                         std::vector<int64_t> &k_spatial) {
                       if (kdim == spatial_dims) {
-                        // Compute input position
-                        std::vector<int64_t> in_coords(spatial_dims);
+                        // Compute input spatial position
+                        std::vector<int64_t> in_spatial(spatial_dims);
                         bool valid = true;
+
                         for (int i = 0; i < spatial_dims; ++i) {
                           int64_t stride =
                               opts.strides.empty() ? 1 : opts.strides[i];
@@ -3182,8 +3389,8 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
                           int64_t pad_left =
                               opts.padding.empty() ? 0 : opts.padding[i].first;
 
-                          int64_t in_pos = out_coords[i] * stride +
-                                           kcoords[i] * kernel_dil - pad_left;
+                          int64_t in_pos = out_spatial[i] * stride +
+                                           k_spatial[i] * kernel_dil - pad_left;
 
                           // Apply input dilation
                           if (input_dil > 1) {
@@ -3194,57 +3401,75 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
                             in_pos /= input_dil;
                           }
 
-                          if (in_pos < 0 || in_pos >= tensor->shape[i + 2]) {
+                          if (in_pos < 0 ||
+                              in_pos >= canonical_input_shape[i + 2]) {
                             valid = false;
                             break;
                           }
-                          in_coords[i] = in_pos;
+                          in_spatial[i] = in_pos;
                         }
 
                         if (valid) {
-                          // Compute indices
+                          // Compute input index
                           size_t in_idx =
                               b * in_strides[0] + ic * in_strides[1];
                           for (int i = 0; i < spatial_dims; ++i) {
-                            in_idx += in_coords[i] * in_strides[i + 2];
+                            in_idx += in_spatial[i] * in_strides[i + 2];
                           }
 
+                          // Compute kernel index
                           size_t kernel_idx =
                               oc * kernel_strides[0] + ic * kernel_strides[1];
                           for (int i = 0; i < spatial_dims; ++i) {
-                            kernel_idx += kcoords[i] * kernel_strides[i + 2];
+                            kernel_idx += k_spatial[i] * kernel_strides[i + 2];
                           }
 
-                          out_arr[out_idx] +=
-                              static_cast<OutputScalar>(tensor_arr[in_idx]) *
-                              static_cast<OutputScalar>(kernel_arr[kernel_idx]);
+                          canonical_out_arr[out_idx] +=
+                              static_cast<OutputScalar>(
+                                  canonical_input_arr[in_idx]) *
+                              static_cast<OutputScalar>(
+                                  canonical_kernel_arr[kernel_idx]);
                         }
                         return;
                       }
 
-                      for (int64_t k = 0; k < kernel->shape[kdim + 2]; ++k) {
-                        kcoords[kdim] = k;
-                        iterate_kernel(kdim + 1, kcoords);
+                      for (int64_t k = 0; k < canonical_kernel_shape[kdim + 2];
+                           ++k) {
+                        k_spatial[kdim] = k;
+                        iterate_kernel(kdim + 1, k_spatial);
                       }
                     };
 
-                    std::vector<int64_t> kcoords(spatial_dims);
-                    iterate_kernel(0, kcoords);
+                    std::vector<int64_t> k_spatial(spatial_dims);
+                    iterate_kernel(0, k_spatial);
                   }
                   return;
                 }
 
-                for (int64_t i = 0; i < out_shape[dim + 2]; ++i) {
-                  out_coords[dim] = i;
-                  iterate_spatial(dim + 1, out_coords);
+                for (int64_t i = 0; i < canonical_out_shape[dim + 2]; ++i) {
+                  out_spatial[dim] = i;
+                  iterate_out_spatial(dim + 1, out_spatial);
                 }
               };
 
-              std::vector<int64_t> out_coords(spatial_dims);
-              iterate_spatial(0, out_coords);
+              std::vector<int64_t> out_spatial(spatial_dims);
+              iterate_out_spatial(0, out_spatial);
             }
           }
-        },
+
+          // Transpose output back to desired layout if needed
+          auto &out_arr = result->data.emplace<FlatArray<OutputScalar>>();
+          if (opts.output_permutation.empty()) {
+            out_arr = std::move(canonical_out_arr);
+          } else {
+            // Compute inverse output permutation
+            std::vector<int64_t> inv_output_perm =
+                invert_permutation(opts.output_permutation);
+            auto [transposed_arr, transposed_shape] = transpose_tensor(
+                canonical_out_arr, canonical_out_shape, inv_output_perm);
+            out_arr = std::move(transposed_arr);
+          }
+
         tensor->data);
 
     return fine::Encoder<fine::ResourcePtr<EigenTensor>>::encode(env, result);
@@ -3281,9 +3506,28 @@ constant_nif(ErlNifEnv *env, ScalarType type, std::vector<int64_t> shape,
   auto tensor = fine::make_resource<EigenTensor>();
   tensor->shape = shape;
 
+  // Validate shape dimensions
+  for (auto dim : shape) {
+    if (dim < 0) {
+      throw std::runtime_error("Shape dimensions must be non-negative, got: " +
+                               std::to_string(dim));
+    }
+  }
+
+  // Calculate total elements with overflow checking
   size_t num_elements = 1;
-  for (auto dim : shape)
+  for (auto dim : shape) {
+    if (dim > 0 && num_elements > SIZE_MAX / dim) {
+      throw std::runtime_error("Shape dimensions overflow: tensor too large");
+    }
     num_elements *= dim;
+  }
+
+  if (num_elements >
+      static_cast<size_t>(std::numeric_limits<Eigen::Index>::max())) {
+    throw std::runtime_error("Tensor size exceeds maximum: " +
+                             std::to_string(num_elements));
+  }
 
   auto init = [&](auto scalar_ptr) {
     using Scalar = std::decay_t<decltype(*scalar_ptr)>;
@@ -3385,6 +3629,14 @@ fine::ResourcePtr<EigenTensor> eye_nif(ErlNifEnv *env, ScalarType type,
   if (shape.size() < 2)
     throw std::runtime_error("Eye requires at least 2 dimensions");
 
+  // Validate shape dimensions
+  for (auto dim : shape) {
+    if (dim < 0) {
+      throw std::runtime_error("Shape dimensions must be non-negative, got: " +
+                               std::to_string(dim));
+    }
+  }
+
   auto tensor = fine::make_resource<EigenTensor>();
   tensor->shape = shape;
 
@@ -3392,14 +3644,33 @@ fine::ResourcePtr<EigenTensor> eye_nif(ErlNifEnv *env, ScalarType type,
   int rows = shape[shape.size() - 2];
   int cols = shape[shape.size() - 1];
 
-  // Calculate batch size from all preceding dimensions
+  // Calculate batch size from all preceding dimensions with overflow checking
   size_t batch_size = 1;
   for (size_t i = 0; i < shape.size() - 2; ++i) {
+    if (shape[i] > 0 && batch_size > SIZE_MAX / shape[i]) {
+      throw std::runtime_error("Shape dimensions overflow: tensor too large");
+    }
     batch_size *= shape[i];
   }
 
-  size_t matrix_elements = rows * cols;
+  // Check matrix_elements overflow
+  size_t matrix_elements =
+      static_cast<size_t>(rows) * static_cast<size_t>(cols);
+  if (cols > 0 && rows > static_cast<int>(SIZE_MAX / cols)) {
+    throw std::runtime_error("Matrix dimensions overflow: too large");
+  }
+
+  // Check total_elements overflow
   size_t total_elements = batch_size * matrix_elements;
+  if (matrix_elements > 0 && batch_size > SIZE_MAX / matrix_elements) {
+    throw std::runtime_error("Total tensor size overflow: too large");
+  }
+
+  if (total_elements >
+      static_cast<size_t>(std::numeric_limits<Eigen::Index>::max())) {
+    throw std::runtime_error("Tensor size exceeds maximum: " +
+                             std::to_string(total_elements));
+  }
 
   auto init = [&](auto scalar_ptr) {
     using Scalar = std::decay_t<decltype(*scalar_ptr)>;
@@ -3466,9 +3737,28 @@ fine::ResourcePtr<EigenTensor> iota_nif(ErlNifEnv *env, ScalarType type,
   auto tensor = fine::make_resource<EigenTensor>();
   tensor->shape = shape;
 
+  // Validate shape dimensions
+  for (auto dim : shape) {
+    if (dim < 0) {
+      throw std::runtime_error("Shape dimensions must be non-negative, got: " +
+                               std::to_string(dim));
+    }
+  }
+
+  // Calculate total elements with overflow checking
   size_t num_elements = 1;
-  for (auto dim : shape)
+  for (auto dim : shape) {
+    if (dim > 0 && num_elements > SIZE_MAX / dim) {
+      throw std::runtime_error("Shape dimensions overflow: tensor too large");
+    }
     num_elements *= dim;
+  }
+
+  if (num_elements >
+      static_cast<size_t>(std::numeric_limits<Eigen::Index>::max())) {
+    throw std::runtime_error("Tensor size exceeds maximum: " +
+                             std::to_string(num_elements));
+  }
 
   // Validate axis
   if (axis != -1 && (axis < 0 || axis >= static_cast<int64_t>(shape.size()))) {
@@ -3551,6 +3841,14 @@ reshape_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
   // Data is shared/copied? Nx backends usually implement immutable semantics.
   // We should copy data. But for reshape, maybe we can optimize?
   // Nx expects a new tensor.
+
+  // Validate shape dimensions
+  for (auto dim : new_shape) {
+    if (dim < 0) {
+      throw std::runtime_error("Shape dimensions must be non-negative, got: " +
+                               std::to_string(dim));
+    }
+  }
 
   // Validate size
   size_t current_size = 1;
@@ -3661,6 +3959,15 @@ fine::ResourcePtr<EigenTensor>
 broadcast_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
               std::vector<int64_t> shape, std::vector<int64_t> axes) {
   auto result = fine::make_resource<EigenTensor>();
+
+  // Validate shape dimensions
+  for (auto dim : shape) {
+    if (dim < 0) {
+      throw std::runtime_error("Shape dimensions must be non-negative, got: " +
+                               std::to_string(dim));
+    }
+  }
+
   result->shape = shape;
 
   // logic similar to transpose but with modulo for broadcasting dims?
@@ -3763,6 +4070,14 @@ pad_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> tensor,
     // Output dim = low + high + (dim-1)*interior + dim
     output_shape[i] =
         low + high + (tensor->shape[i] - 1) * interior + tensor->shape[i];
+
+    // Validate computed dimension
+    if (output_shape[i] < 0) {
+      throw std::runtime_error(
+          "Computed output shape dimension must be non-negative, got: " +
+          std::to_string(output_shape[i]) + " at dimension " +
+          std::to_string(i));
+    }
   }
   result->shape = output_shape;
 
