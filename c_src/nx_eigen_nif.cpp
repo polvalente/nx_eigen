@@ -2947,17 +2947,16 @@ static AxisGeometry axis_geometry(const std::vector<int64_t> &shape,
 
 enum class FftDirection { Forward, Inverse };
 
-// Run 1-D complex-to-complex FFT (forward or inverse) along one axis
-// of a flat complex<double> buffer, writing results into out_buf.
-// fft_length may differ from the axis size (zero-pad or truncate).
-// Delegates each 1-D transform to the pluggable nx_eigen_fft interface.
-static void fft_along_axis(const std::complex<double> *in_buf,
-                           std::complex<double> *out_buf,
-                           const AxisGeometry &geom, int64_t fft_length,
-                           FftDirection direction) {
+// Run 1-D complex-to-complex FFT (forward or inverse) along one axis.
+// Template version for both float and double precision.
+template <typename T>
+static void fft_along_axis_t(const std::complex<T> *in_buf,
+                             std::complex<T> *out_buf,
+                             const AxisGeometry &geom, int64_t fft_length,
+                             FftDirection direction) {
   // Temporary contiguous buffers for a single 1-D transform
-  std::vector<std::complex<double>> in_vec(fft_length, {0.0, 0.0});
-  std::vector<std::complex<double>> out_vec(fft_length);
+  std::vector<std::complex<T>> in_vec(fft_length, {T(0), T(0)});
+  std::vector<std::complex<T>> out_vec(fft_length);
 
   int64_t copy_len = std::min(geom.n, fft_length);
 
@@ -2968,19 +2967,32 @@ static void fft_along_axis(const std::complex<double> *in_buf,
         in_vec[p] = in_buf[o * (geom.n * geom.inner) + p * geom.inner + i];
       // Zero-pad if fft_length > axis size
       for (int64_t p = copy_len; p < fft_length; ++p)
-        in_vec[p] = {0.0, 0.0};
+        in_vec[p] = {T(0), T(0)};
 
       int rc;
-      if (direction == FftDirection::Forward)
-        rc = nx_eigen_fft_forward(
-            reinterpret_cast<const double *>(in_vec.data()),
-            reinterpret_cast<double *>(out_vec.data()),
-            static_cast<int>(fft_length));
-      else
-        rc = nx_eigen_fft_inverse(
-            reinterpret_cast<const double *>(in_vec.data()),
-            reinterpret_cast<double *>(out_vec.data()),
-            static_cast<int>(fft_length));
+      if constexpr (std::is_same_v<T, float>) {
+        if (direction == FftDirection::Forward)
+          rc = nx_eigen_fft_forward_f32(
+              reinterpret_cast<const float *>(in_vec.data()),
+              reinterpret_cast<float *>(out_vec.data()),
+              static_cast<int>(fft_length));
+        else
+          rc = nx_eigen_fft_inverse_f32(
+              reinterpret_cast<const float *>(in_vec.data()),
+              reinterpret_cast<float *>(out_vec.data()),
+              static_cast<int>(fft_length));
+      } else {
+        if (direction == FftDirection::Forward)
+          rc = nx_eigen_fft_forward_f64(
+              reinterpret_cast<const double *>(in_vec.data()),
+              reinterpret_cast<double *>(out_vec.data()),
+              static_cast<int>(fft_length));
+        else
+          rc = nx_eigen_fft_inverse_f64(
+              reinterpret_cast<const double *>(in_vec.data()),
+              reinterpret_cast<double *>(out_vec.data()),
+              static_cast<int>(fft_length));
+      }
 
       if (rc != 0)
         throw std::runtime_error(
@@ -2996,35 +3008,26 @@ static void fft_along_axis(const std::complex<double> *in_buf,
   }
 }
 
-// Check if input tensor uses single precision (f32/c64)
-static bool is_single_precision(const EigenTensor &t) {
+// Convert any EigenTensor variant to a flat vector<complex<T>>
+template <typename T>
+static std::vector<std::complex<T>>
+to_complex(const EigenTensor &t) {
   return std::visit(
-      [](const auto &arr) -> bool {
-        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
-        return std::is_same_v<Scalar, float> ||
-               std::is_same_v<Scalar, std::complex<float>>;
-      },
-      t.data);
-}
-
-// Convert any EigenTensor variant to a flat vector<complex<double>>
-static std::vector<std::complex<double>>
-to_complex128(const EigenTensor &t) {
-  return std::visit(
-      [](const auto &arr) -> std::vector<std::complex<double>> {
+      [](const auto &arr) -> std::vector<std::complex<T>> {
         using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
         size_t n = arr.size();
-        std::vector<std::complex<double>> out(n);
+        std::vector<std::complex<T>> out(n);
         if constexpr (std::is_same_v<Scalar, std::complex<float>>) {
           for (size_t i = 0; i < n; ++i)
-            out[i] = {static_cast<double>(arr(i).real()),
-                      static_cast<double>(arr(i).imag())};
+            out[i] = {static_cast<T>(arr(i).real()),
+                      static_cast<T>(arr(i).imag())};
         } else if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
           for (size_t i = 0; i < n; ++i)
-            out[i] = arr(i);
+            out[i] = {static_cast<T>(arr(i).real()),
+                      static_cast<T>(arr(i).imag())};
         } else {
           for (size_t i = 0; i < n; ++i)
-            out[i] = {static_cast<double>(arr(i)), 0.0};
+            out[i] = {static_cast<T>(arr(i)), T(0)};
         }
         return out;
       },
@@ -3037,17 +3040,15 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
   (void)env;
   auto geom = axis_geometry(tensor->shape, axis);
   int64_t fft_length = length;
-  // FFT returns c64 for all inputs except f64/c128
-  bool use_single = !std::visit(
+
+  // Check if input is double precision
+  bool use_double = std::visit(
       [](const auto &arr) -> bool {
         using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
         return std::is_same_v<Scalar, double> ||
                std::is_same_v<Scalar, std::complex<double>>;
       },
       tensor->data);
-
-  // Convert input to complex<double>
-  auto in_buf = to_complex128(*tensor);
 
   // Build output shape (axis dimension becomes fft_length)
   auto out_shape = tensor->shape;
@@ -3058,34 +3059,32 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
   size_t out_elems = 1;
   for (auto d : out_shape)
     out_elems *= d;
-  std::vector<std::complex<double>> out_buf(out_elems);
 
-  fft_along_axis(in_buf.data(), out_buf.data(), geom, fft_length,
-                 FftDirection::Forward);
-
-  // Build result tensor with matching precision
   auto result = fine::make_resource<EigenTensor>();
   result->shape = out_shape;
-  
-  if (use_single) {
-    // Return c64 (complex<float>) for f32/c64 input
-    std::vector<std::complex<float>> out_buf_f32(out_elems);
-    for (size_t i = 0; i < out_elems; ++i)
-      out_buf_f32[i] = std::complex<float>(
-          static_cast<float>(out_buf[i].real()),
-          static_cast<float>(out_buf[i].imag()));
-    auto &res_arr = result->data.emplace<FlatArray<std::complex<float>>>();
-    res_arr.resize(out_elems);
-    std::memcpy(res_arr.data(), out_buf_f32.data(),
-                out_elems * sizeof(std::complex<float>));
-  } else {
-    // Return c128 (complex<double>) for f64/c128 input
+
+  if (use_double) {
+    // Use double precision throughout
+    auto in_buf = to_complex<double>(*tensor);
+    std::vector<std::complex<double>> out_buf(out_elems);
+    fft_along_axis_t<double>(in_buf.data(), out_buf.data(), geom, fft_length,
+                            FftDirection::Forward);
     auto &res_arr = result->data.emplace<FlatArray<std::complex<double>>>();
     res_arr.resize(out_elems);
     std::memcpy(res_arr.data(), out_buf.data(),
                 out_elems * sizeof(std::complex<double>));
+  } else {
+    // Use float precision throughout (no conversion needed)
+    auto in_buf = to_complex<float>(*tensor);
+    std::vector<std::complex<float>> out_buf(out_elems);
+    fft_along_axis_t<float>(in_buf.data(), out_buf.data(), geom, fft_length,
+                           FftDirection::Forward);
+    auto &res_arr = result->data.emplace<FlatArray<std::complex<float>>>();
+    res_arr.resize(out_elems);
+    std::memcpy(res_arr.data(), out_buf.data(),
+                out_elems * sizeof(std::complex<float>));
   }
-  
+
   return result;
 }
 FINE_NIF(fft_nif, 0);
@@ -3096,16 +3095,15 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   (void)env;
   auto geom = axis_geometry(tensor->shape, axis);
   int64_t fft_length = length;
-  // IFFT returns c64 for all inputs except f64/c128
-  bool use_single = !std::visit(
+
+  // Check if input is double precision
+  bool use_double = std::visit(
       [](const auto &arr) -> bool {
         using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
         return std::is_same_v<Scalar, double> ||
                std::is_same_v<Scalar, std::complex<double>>;
       },
       tensor->data);
-
-  auto in_buf = to_complex128(*tensor);
 
   auto out_shape = tensor->shape;
   int64_t ndim = static_cast<int64_t>(out_shape.size());
@@ -3115,39 +3113,40 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   size_t out_elems = 1;
   for (auto d : out_shape)
     out_elems *= d;
-  std::vector<std::complex<double>> out_buf(out_elems);
 
-  fft_along_axis(in_buf.data(), out_buf.data(), geom, fft_length,
-                 FftDirection::Inverse);
-
-  // The interface returns unnormalised IDFT – divide by N
-  double inv_n = 1.0 / static_cast<double>(fft_length);
-  for (size_t i = 0; i < out_elems; ++i)
-    out_buf[i] *= inv_n;
-
-  // Build result tensor with matching precision
   auto result = fine::make_resource<EigenTensor>();
   result->shape = out_shape;
-  
-  if (use_single) {
-    // Return c64 (complex<float>) for f32/c64 input
-    std::vector<std::complex<float>> out_buf_f32(out_elems);
+
+  if (use_double) {
+    // Use double precision throughout
+    auto in_buf = to_complex<double>(*tensor);
+    std::vector<std::complex<double>> out_buf(out_elems);
+    fft_along_axis_t<double>(in_buf.data(), out_buf.data(), geom, fft_length,
+                            FftDirection::Inverse);
+    // The interface returns unnormalised IDFT – divide by N
+    double inv_n = 1.0 / static_cast<double>(fft_length);
     for (size_t i = 0; i < out_elems; ++i)
-      out_buf_f32[i] = std::complex<float>(
-          static_cast<float>(out_buf[i].real()),
-          static_cast<float>(out_buf[i].imag()));
-    auto &res_arr = result->data.emplace<FlatArray<std::complex<float>>>();
-    res_arr.resize(out_elems);
-    std::memcpy(res_arr.data(), out_buf_f32.data(),
-                out_elems * sizeof(std::complex<float>));
-  } else {
-    // Return c128 (complex<double>) for f64/c128 input
+      out_buf[i] *= inv_n;
     auto &res_arr = result->data.emplace<FlatArray<std::complex<double>>>();
     res_arr.resize(out_elems);
     std::memcpy(res_arr.data(), out_buf.data(),
                 out_elems * sizeof(std::complex<double>));
+  } else {
+    // Use float precision throughout (no conversion needed)
+    auto in_buf = to_complex<float>(*tensor);
+    std::vector<std::complex<float>> out_buf(out_elems);
+    fft_along_axis_t<float>(in_buf.data(), out_buf.data(), geom, fft_length,
+                           FftDirection::Inverse);
+    // The interface returns unnormalised IDFT – divide by N
+    float inv_n = 1.0f / static_cast<float>(fft_length);
+    for (size_t i = 0; i < out_elems; ++i)
+      out_buf[i] *= inv_n;
+    auto &res_arr = result->data.emplace<FlatArray<std::complex<float>>>();
+    res_arr.resize(out_elems);
+    std::memcpy(res_arr.data(), out_buf.data(),
+                out_elems * sizeof(std::complex<float>));
   }
-  
+
   return result;
 }
 FINE_NIF(ifft_nif, 0);

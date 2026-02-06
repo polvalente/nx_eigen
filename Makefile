@@ -47,10 +47,10 @@ else ifeq ($(NX_EIGEN_FFT_LIB),fftw)
   # Try pkg-config first (handles Homebrew installations properly)
   PKG_CONFIG_FFTW3 := $(shell pkg-config --exists fftw3 2>/dev/null && echo yes)
   ifeq ($(PKG_CONFIG_FFTW3),yes)
-    FFT_CFLAGS = $(shell pkg-config --cflags fftw3)
-    FFT_LDFLAGS = $(shell pkg-config --libs fftw3)
+    FFT_CFLAGS = $(shell pkg-config --cflags fftw3 fftw3f)
+    FFT_LDFLAGS = $(shell pkg-config --libs fftw3 fftw3f)
   else
-    FFT_LDFLAGS = -lfftw3
+    FFT_LDFLAGS = -lfftw3 -lfftw3f
   endif
 else ifeq ($(NX_EIGEN_FFT_LIB),none)
   FFT_SRCS = c_src/nx_eigen_fft_none.cpp

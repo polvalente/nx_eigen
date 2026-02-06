@@ -31,23 +31,45 @@
 extern "C" {
 #endif
 
-// Forward (DFT) 1-D complex-to-complex transform.
+// Forward (DFT) 1-D complex-to-complex transform (float32).
 //
-// @param in   Input: n interleaved complex doubles (2*n doubles total).
-// @param out  Output: n interleaved complex doubles (2*n doubles total).
+// @param in   Input: n interleaved complex floats (2*n floats total).
+// @param out  Output: n interleaved complex floats (2*n floats total).
 //             May alias `in` (in-place is allowed).
 // @param n    Number of complex samples (FFT length).
 // @return     0 on success, non-zero on failure.
-int nx_eigen_fft_forward(const double *in, double *out, int n);
+int nx_eigen_fft_forward_f32(const float *in, float *out, int n);
 
-// Inverse (IDFT) 1-D complex-to-complex transform (unnormalised).
+// Forward (DFT) 1-D complex-to-complex transform (float64).
 //
 // @param in   Input: n interleaved complex doubles (2*n doubles total).
 // @param out  Output: n interleaved complex doubles (2*n doubles total).
 //             May alias `in` (in-place is allowed).
 // @param n    Number of complex samples (FFT length).
 // @return     0 on success, non-zero on failure.
-int nx_eigen_fft_inverse(const double *in, double *out, int n);
+int nx_eigen_fft_forward_f64(const double *in, double *out, int n);
+
+// Inverse (IDFT) 1-D complex-to-complex transform (unnormalised, float32).
+//
+// @param in   Input: n interleaved complex floats (2*n floats total).
+// @param out  Output: n interleaved complex floats (2*n floats total).
+//             May alias `in` (in-place is allowed).
+// @param n    Number of complex samples (FFT length).
+// @return     0 on success, non-zero on failure.
+int nx_eigen_fft_inverse_f32(const float *in, float *out, int n);
+
+// Inverse (IDFT) 1-D complex-to-complex transform (unnormalised, float64).
+//
+// @param in   Input: n interleaved complex doubles (2*n doubles total).
+// @param out  Output: n interleaved complex doubles (2*n doubles total).
+//             May alias `in` (in-place is allowed).
+// @param n    Number of complex samples (FFT length).
+// @return     0 on success, non-zero on failure.
+int nx_eigen_fft_inverse_f64(const double *in, double *out, int n);
+
+// Legacy names for backward compatibility
+#define nx_eigen_fft_forward nx_eigen_fft_forward_f64
+#define nx_eigen_fft_inverse nx_eigen_fft_inverse_f64
 
 #ifdef __cplusplus
 }

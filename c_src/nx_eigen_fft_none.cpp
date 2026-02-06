@@ -9,11 +9,19 @@
 
 extern "C" {
 
-int nx_eigen_fft_forward(const double * /*in*/, double * /*out*/, int /*n*/) {
+int nx_eigen_fft_forward_f32(const float * /*in*/, float * /*out*/, int /*n*/) {
   return -1;
 }
 
-int nx_eigen_fft_inverse(const double * /*in*/, double * /*out*/, int /*n*/) {
+int nx_eigen_fft_inverse_f32(const float * /*in*/, float * /*out*/, int /*n*/) {
+  return -1;
+}
+
+int nx_eigen_fft_forward_f64(const double * /*in*/, double * /*out*/, int /*n*/) {
+  return -1;
+}
+
+int nx_eigen_fft_inverse_f64(const double * /*in*/, double * /*out*/, int /*n*/) {
   return -1;
 }
 
