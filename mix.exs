@@ -10,8 +10,21 @@ defmodule NxEigen.MixProject do
       compilers: [:elixir_make] ++ Mix.compilers(),
       make_targets: ["all"],
       make_clean: ["clean"],
+      make_env: make_env(),
       deps: deps()
     ]
+  end
+
+  defp make_env do
+    env = %{}
+
+    env =
+      case System.get_env("NX_EIGEN_FFT_LIB") do
+        nil -> env
+        val -> Map.put(env, "NX_EIGEN_FFT_LIB", val)
+      end
+
+    env
   end
 
   # Run "mix help compile.app" to learn about applications.

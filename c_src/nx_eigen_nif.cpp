@@ -5,6 +5,10 @@
 #include <string>
 #include <vector>
 
+#ifndef NX_EIGEN_DISABLE_FFTW
+#include <fftw3.h>
+#endif
+
 // Supported scalar types for EigenTensor
 enum class ScalarType {
   U8,
@@ -2884,6 +2888,184 @@ fine::ResourcePtr<EigenTensor> window_scatter_min_nif(
 }
 FINE_NIF(window_scatter_min_nif, 0);
 
+#ifndef NX_EIGEN_DISABLE_FFTW
+
+// ── FFTW-backed FFT helpers ──────────────────────────────────────────────────
+
+// Compute stride / batch dimensions for operating along a single axis
+// of a multi-dimensional tensor stored in row-major (C) order.
+//
+// Given shape [d0, d1, ..., d_{n-1}] and target axis k:
+//   outer = d0 * d1 * ... * d_{k-1}          (product of dims before axis)
+//   n     = d_k                               (size of the axis)
+//   inner = d_{k+1} * ... * d_{n-1}           (product of dims after axis)
+//
+// The element at multi-index [i0, ..., i_{n-1}] is stored at flat offset:
+//   outer_idx * (n * inner) + pos * inner + inner_idx
+// where outer_idx ∈ [0, outer), pos ∈ [0, n), inner_idx ∈ [0, inner).
+
+struct AxisGeometry {
+  int64_t outer; // product of dims before the axis
+  int64_t n;     // length of the axis itself
+  int64_t inner; // product of dims after the axis
+};
+
+static AxisGeometry axis_geometry(const std::vector<int64_t> &shape,
+                                  int64_t axis) {
+  int64_t ndim = static_cast<int64_t>(shape.size());
+  if (axis < 0)
+    axis += ndim;
+  if (axis < 0 || axis >= ndim)
+    throw std::runtime_error("fft: axis out of range");
+
+  AxisGeometry g;
+  g.n = shape[axis];
+  g.outer = 1;
+  for (int64_t i = 0; i < axis; ++i)
+    g.outer *= shape[i];
+  g.inner = 1;
+  for (int64_t i = axis + 1; i < ndim; ++i)
+    g.inner *= shape[i];
+  return g;
+}
+
+// Run 1-D complex-to-complex FFT (forward or inverse) along one axis
+// of a flat complex<double> buffer, writing results into out_buf.
+// fft_length may differ from the axis size (zero-pad or truncate).
+static void fftw_along_axis(const std::complex<double> *in_buf,
+                            std::complex<double> *out_buf,
+                            const AxisGeometry &geom, int64_t fft_length,
+                            int sign /* FFTW_FORWARD or FFTW_BACKWARD */) {
+  // Temporary contiguous buffers for a single 1-D transform
+  std::vector<std::complex<double>> in_vec(fft_length, {0.0, 0.0});
+  std::vector<std::complex<double>> out_vec(fft_length);
+
+  fftw_plan plan = fftw_plan_dft_1d(
+      static_cast<int>(fft_length), reinterpret_cast<fftw_complex *>(in_vec.data()),
+      reinterpret_cast<fftw_complex *>(out_vec.data()), sign, FFTW_ESTIMATE);
+  if (!plan)
+    throw std::runtime_error("fftw_plan_dft_1d failed");
+
+  int64_t copy_len = std::min(geom.n, fft_length);
+
+  for (int64_t o = 0; o < geom.outer; ++o) {
+    for (int64_t i = 0; i < geom.inner; ++i) {
+      // Gather the 1-D slice into the contiguous buffer
+      for (int64_t p = 0; p < copy_len; ++p)
+        in_vec[p] = in_buf[o * (geom.n * geom.inner) + p * geom.inner + i];
+      // Zero-pad if fft_length > axis size
+      for (int64_t p = copy_len; p < fft_length; ++p)
+        in_vec[p] = {0.0, 0.0};
+
+      fftw_execute(plan);
+
+      // Scatter back
+      for (int64_t p = 0; p < fft_length; ++p)
+        out_buf[o * (fft_length * geom.inner) + p * geom.inner + i] =
+            out_vec[p];
+    }
+  }
+  fftw_destroy_plan(plan);
+}
+
+// Convert any EigenTensor variant to a flat vector<complex<double>>
+static std::vector<std::complex<double>>
+to_complex128(const EigenTensor &t) {
+  return std::visit(
+      [](const auto &arr) -> std::vector<std::complex<double>> {
+        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
+        size_t n = arr.size();
+        std::vector<std::complex<double>> out(n);
+        if constexpr (std::is_same_v<Scalar, std::complex<float>>) {
+          for (size_t i = 0; i < n; ++i)
+            out[i] = {static_cast<double>(arr(i).real()),
+                      static_cast<double>(arr(i).imag())};
+        } else if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+          for (size_t i = 0; i < n; ++i)
+            out[i] = arr(i);
+        } else {
+          for (size_t i = 0; i < n; ++i)
+            out[i] = {static_cast<double>(arr(i)), 0.0};
+        }
+        return out;
+      },
+      t.data);
+}
+
+fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
+                                       fine::ResourcePtr<EigenTensor> tensor,
+                                       int64_t length, int64_t axis) {
+  (void)env;
+  auto geom = axis_geometry(tensor->shape, axis);
+  int64_t fft_length = length;
+
+  // Convert input to complex<double>
+  auto in_buf = to_complex128(*tensor);
+
+  // Build output shape (axis dimension becomes fft_length)
+  auto out_shape = tensor->shape;
+  int64_t ndim = static_cast<int64_t>(out_shape.size());
+  int64_t real_axis = axis < 0 ? axis + ndim : axis;
+  out_shape[real_axis] = fft_length;
+
+  size_t out_elems = 1;
+  for (auto d : out_shape)
+    out_elems *= d;
+  std::vector<std::complex<double>> out_buf(out_elems);
+
+  fftw_along_axis(in_buf.data(), out_buf.data(), geom, fft_length,
+                  FFTW_FORWARD);
+
+  // Build result tensor as C128 (complex<double>)
+  auto result = fine::make_resource<EigenTensor>();
+  result->shape = out_shape;
+  auto &res_arr = result->data.emplace<FlatArray<std::complex<double>>>();
+  res_arr.resize(out_elems);
+  std::memcpy(res_arr.data(), out_buf.data(),
+              out_elems * sizeof(std::complex<double>));
+  return result;
+}
+FINE_NIF(fft_nif, 0);
+
+fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
+                                        fine::ResourcePtr<EigenTensor> tensor,
+                                        int64_t length, int64_t axis) {
+  (void)env;
+  auto geom = axis_geometry(tensor->shape, axis);
+  int64_t fft_length = length;
+
+  auto in_buf = to_complex128(*tensor);
+
+  auto out_shape = tensor->shape;
+  int64_t ndim = static_cast<int64_t>(out_shape.size());
+  int64_t real_axis = axis < 0 ? axis + ndim : axis;
+  out_shape[real_axis] = fft_length;
+
+  size_t out_elems = 1;
+  for (auto d : out_shape)
+    out_elems *= d;
+  std::vector<std::complex<double>> out_buf(out_elems);
+
+  fftw_along_axis(in_buf.data(), out_buf.data(), geom, fft_length,
+                  FFTW_BACKWARD);
+
+  // FFTW backward transform is unnormalised – divide by N
+  double inv_n = 1.0 / static_cast<double>(fft_length);
+  for (size_t i = 0; i < out_elems; ++i)
+    out_buf[i] *= inv_n;
+
+  auto result = fine::make_resource<EigenTensor>();
+  result->shape = out_shape;
+  auto &res_arr = result->data.emplace<FlatArray<std::complex<double>>>();
+  res_arr.resize(out_elems);
+  std::memcpy(res_arr.data(), out_buf.data(),
+              out_elems * sizeof(std::complex<double>));
+  return result;
+}
+FINE_NIF(ifft_nif, 0);
+
+#else // NX_EIGEN_DISABLE_FFTW
+
 fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
                                        fine::ResourcePtr<EigenTensor> tensor,
                                        int64_t length, int64_t axis) {
@@ -2892,7 +3074,8 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
   (void)length;
   (void)axis;
   throw std::runtime_error(
-      "FFTW support is disabled at build time (NX_EIGEN_DISABLE_FFTW)");
+      "FFTW support is disabled at build time (NX_EIGEN_DISABLE_FFTW). "
+      "Install FFTW3 and rebuild without NX_EIGEN_FFT_LIB=none.");
 }
 FINE_NIF(fft_nif, 0);
 
@@ -2904,9 +3087,12 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   (void)length;
   (void)axis;
   throw std::runtime_error(
-      "FFTW support is disabled at build time (NX_EIGEN_DISABLE_FFTW)");
+      "FFTW support is disabled at build time (NX_EIGEN_DISABLE_FFTW). "
+      "Install FFTW3 and rebuild without NX_EIGEN_FFT_LIB=none.");
 }
 FINE_NIF(ifft_nif, 0);
+
+#endif // NX_EIGEN_DISABLE_FFTW
 
 // Helper function to parse convolution options
 struct ConvOptions {

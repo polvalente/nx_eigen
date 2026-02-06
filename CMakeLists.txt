@@ -42,7 +42,33 @@ target_include_directories(nx_eigen PRIVATE
   "${FINE_INCLUDE}"
 )
 
-target_compile_definitions(nx_eigen PRIVATE NX_EIGEN_DISABLE_FFTW)
+# FFT library choice.
+# Set NX_EIGEN_FFT_LIB to "fftw" (default) or "none" (disables FFT, useful for cross-compilation).
+set(NX_EIGEN_FFT_LIB "fftw" CACHE STRING "FFT library to use: fftw or none")
+
+if(NX_EIGEN_FFT_LIB STREQUAL "none")
+  target_compile_definitions(nx_eigen PRIVATE NX_EIGEN_DISABLE_FFTW)
+  message(STATUS "FFT support: disabled (NX_EIGEN_FFT_LIB=none)")
+elseif(NX_EIGEN_FFT_LIB STREQUAL "fftw")
+  # Try pkg-config first, fall back to raw -lfftw3
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(FFTW3 QUIET fftw3)
+  endif()
+
+  if(FFTW3_FOUND)
+    target_include_directories(nx_eigen PRIVATE ${FFTW3_INCLUDE_DIRS})
+    target_link_libraries(nx_eigen PRIVATE ${FFTW3_LIBRARIES})
+    target_link_directories(nx_eigen PRIVATE ${FFTW3_LIBRARY_DIRS})
+    message(STATUS "FFT support: FFTW3 (via pkg-config)")
+  else()
+    # Fall back: just link -lfftw3 and hope the system paths cover it
+    target_link_libraries(nx_eigen PRIVATE fftw3)
+    message(STATUS "FFT support: FFTW3 (direct link)")
+  endif()
+else()
+  message(FATAL_ERROR "Unsupported NX_EIGEN_FFT_LIB value: ${NX_EIGEN_FFT_LIB}. Use \"fftw\" or \"none\".")
+endif()
 
 # NIFs on macOS typically use dynamic lookup instead of linking to libErlang.
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")

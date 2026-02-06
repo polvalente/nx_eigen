@@ -17,9 +17,22 @@ EIGEN_DIR ?= $(CURDIR)/eigen-$(EIGEN_VERSION)
 EIGEN_INCLUDE = $(EIGEN_DIR)
 FINE_INCLUDE = $(CURDIR)/deps/fine/c_include
 
-# FFTW is intentionally disabled/removed for now.
+# FFT library choice
+# Set NX_EIGEN_FFT_LIB to control which FFT library is used:
+#   fftw  - Use FFTW3 (default for native builds)
+#   none  - Disable FFT support (useful for cross-compilation)
+NX_EIGEN_FFT_LIB ?= fftw
+
 CFLAGS = -fPIC -I$(ERL_INCLUDE_DIR) -I$(EIGEN_INCLUDE) -I$(FINE_INCLUDE) -O3 -std=c++17
 LDFLAGS = -shared
+
+ifeq ($(NX_EIGEN_FFT_LIB),fftw)
+  LDFLAGS += -lfftw3
+else ifeq ($(NX_EIGEN_FFT_LIB),none)
+  CFLAGS += -DNX_EIGEN_DISABLE_FFTW
+else
+  $(error Unsupported NX_EIGEN_FFT_LIB value: $(NX_EIGEN_FFT_LIB). Use "fftw" or "none".)
+endif
 
 UNAME_S := $(shell uname -s)
 TARGET_OS ?= $(UNAME_S)
@@ -56,7 +69,8 @@ ifeq ($(USE_CMAKE),1)
 	$(CMAKE) -S $(CURDIR) -B $(CMAKE_BUILD_DIR) -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
 		$(if $(CMAKE_TOOLCHAIN_FILE),-DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN_FILE),) \
 		$(CMAKE_ARGS) \
-		-DERL_INCLUDE_DIR=$(ERL_INCLUDE_DIR) -DEIGEN_DIR=$(EIGEN_DIR) -DFINE_INCLUDE=$(FINE_INCLUDE)
+		-DERL_INCLUDE_DIR=$(ERL_INCLUDE_DIR) -DEIGEN_DIR=$(EIGEN_DIR) -DFINE_INCLUDE=$(FINE_INCLUDE) \
+		-DNX_EIGEN_FFT_LIB=$(NX_EIGEN_FFT_LIB)
 	$(CMAKE) --build $(CMAKE_BUILD_DIR) --config $(CMAKE_BUILD_TYPE)
 else
 	$(CXX) $(CFLAGS) $(LDFLAGS) c_src/nx_eigen_nif.cpp -o $(LIB_NAME)

@@ -6,7 +6,7 @@ An Elixir Nx backend that binds the [Eigen C++ library](https://eigen.tuxfamily.
 
 - **Complete Nx.Backend implementation** - All required callbacks implemented
 - **Efficient linear algebra** - Uses Eigen's optimized matrix operations
-- **FFT support** - (temporarily disabled)
+- **FFT support** - Via FFTW3 by default; can be disabled for cross-compilation
 - **All Nx types** - Support for u8-u64, s8-s64, f32/f64, c64/c128
 - **Embedded-friendly** - Bitwise operations, integer math, and efficient memory usage
 - **No template metaprogramming nonsense** - Clean, straightforward C++ implementations
@@ -16,6 +16,7 @@ An Elixir Nx backend that binds the [Eigen C++ library](https://eigen.tuxfamily.
 ### Required
 
 - **Eigen** (≥3.4.0) - C++ template library for linear algebra
+- **FFTW3** - For FFT support (optional; see [FFT Library Choice](#fft-library-choice) below)
 - **Elixir** (≥1.14)
 - **Erlang/OTP** (≥25)
 
@@ -33,13 +34,50 @@ mix deps.get
 mix compile
 ```
 
+#### FFT Library Choice
+
+FFT support (`Nx.fft/2`, `Nx.ifft/2`) is provided by [FFTW3](https://www.fftw.org/) by default.
+
+Install FFTW3 on your system:
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install libfftw3-dev
+
+# macOS (Homebrew)
+brew install fftw
+
+# Fedora/RHEL
+sudo dnf install fftw-devel
+```
+
+The FFT library is controlled by the `NX_EIGEN_FFT_LIB` environment variable:
+
+| Value  | Behaviour                                      |
+|--------|-------------------------------------------------|
+| `fftw` | **(default)** Link against FFTW3               |
+| `none` | Disable FFT; `fft`/`ifft` raise at runtime     |
+
+To disable FFT (e.g. when cross-compiling without FFTW available):
+
+```bash
+export NX_EIGEN_FFT_LIB=none
+mix compile
+```
+
+When using the CMake build path, the same variable is forwarded:
+
+```bash
+make USE_CMAKE=1 CMAKE_ARGS="-DNX_EIGEN_FFT_LIB=none"
+```
+
 #### Cross-compilation
 
 This project builds a NIF (`priv/libnx_eigen.so`) via `make`. For cross-compilation you typically want to:
 
 - **Set a toolchain**: `CROSSCOMPILE` (prefix) or `CXX` (full path)
 - **Set the target OS** (so we don't add macOS-only linker flags): `TARGET_OS=Linux|Darwin`
-- **FFT note**: FFT (`fft/ifft`) is currently disabled in the native library build.
+- **Disable FFT** if FFTW is not available for the target: `NX_EIGEN_FFT_LIB=none`
 - **(If needed)** override `ERL_INCLUDE_DIR` to a matching Erlang/OTP include directory
 
 Example (toolchain-prefix style):
@@ -48,6 +86,7 @@ Example (toolchain-prefix style):
 export CROSSCOMPILE=aarch64-linux-gnu-
 export TARGET_OS=Linux
 export EIGEN_DIR=/path/to/eigen
+export NX_EIGEN_FFT_LIB=none  # or fftw if FFTW is available for the target
 
 mix deps.get
 mix compile
@@ -102,7 +141,7 @@ make SKIP_DOWNLOADS=1 USE_CMAKE=1 \
   CMAKE_TOOLCHAIN_FILE=cmake/toolchains/aarch64-linux-gnu-sysroot.cmake \
   CMAKE_BUILD_DIR=$PWD/cmake-build-aarch64 \
   CMAKE_BUILD_TYPE=Release \
-  CMAKE_ARGS="-DCMAKE_SYSROOT=$SYSROOT" \
+  CMAKE_ARGS="-DCMAKE_SYSROOT=$SYSROOT -DNX_EIGEN_FFT_LIB=none" \
   ERL_INCLUDE_DIR="$ERL_INCLUDE_DIR"
 ```
 
@@ -128,7 +167,8 @@ def project do
     make_env: %{
       "EIGEN_DIR" => "/path/to/eigen",
       "CROSSCOMPILE" => "aarch64-linux-gnu-",
-      "TARGET_OS" => "Linux"
+      "TARGET_OS" => "Linux",
+      "NX_EIGEN_FFT_LIB" => "none"  # or "fftw" if FFTW is available for the target
     }
   ]
 end
@@ -169,7 +209,8 @@ a = NxEigen.tensor([[1.0, 2.0], [3.0, 4.0]], type: {:f, 32})
 b = Nx.transpose(a)
 result = Nx.dot(a, b)
 
-# FFT operations are currently disabled in the native library build.
+# FFT (requires FFTW3; see FFT Library Choice in README)
+fft_result = Nx.fft(NxEigen.tensor([1.0, 0.0, 0.0, 0.0]), length: 4)
 ```
 
 ## Implementation Details
