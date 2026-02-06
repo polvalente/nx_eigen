@@ -25,11 +25,20 @@ defmodule NxEigen.DocTest do
       expm1: 1,
       sigmoid: 1,
       tanh: 1,
+      atanh: 1,
+      cosh: 1,
+      ceil: 1,
+      erfc: 1,
     ]
 
   @unsupported_ops [
     reduce: 4,
-    window_reduce: 5
+    window_reduce: 5,
+    # FFT requires FFTW library at build time
+    fft: 2,
+    ifft: 2,
+    fft2: 2,
+    ifft2: 2,
   ]
 
   @sub_byte_types [

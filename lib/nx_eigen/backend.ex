@@ -1,17 +1,18 @@
 defmodule NxEigen.Backend do
   @behaviour Nx.Backend
 
-  defstruct [:state, :id]
+  defstruct [:state]
 
   @impl true
-  def init(opts) do
-    %__MODULE__{id: opts[:id] || make_ref()}
+  def init(_opts) do
+    # Return empty options - this backend doesn't need any configuration
+    []
   end
 
   @impl true
   def from_binary(tensor, binary, _backend_opts) do
     state = NxEigen.NIF.from_binary(binary, tensor.type, tensor.shape)
-    %{tensor | data: %__MODULE__{state: state, id: make_ref()}}
+    %{tensor | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -25,7 +26,7 @@ defmodule NxEigen.Backend do
       %{out | data: tensor.data}
     else
       state = NxEigen.NIF.as_type(tensor.data.state, out.type)
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      %{out | data: %__MODULE__{state: state}}
     end
   end
 
@@ -35,38 +36,38 @@ defmodule NxEigen.Backend do
     scalar_tensor = Nx.tensor(value, type: out.type, backend: Nx.BinaryBackend)
     scalar_state = NxEigen.NIF.from_binary(Nx.to_binary(scalar_tensor), scalar_tensor.type, {})
     state = NxEigen.NIF.constant(out.type, out.shape, scalar_state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def eye(out, _backend_opts) do
     state = NxEigen.NIF.eye(out.type, out.shape)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def iota(out, axis, _backend_opts) do
     axis = if axis, do: axis, else: -1
     state = NxEigen.NIF.iota(out.type, out.shape, axis)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def reshape(out, tensor) do
     state = NxEigen.NIF.reshape(tensor.data.state, out.shape)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def transpose(out, tensor, axes) do
     state = NxEigen.NIF.transpose(tensor.data.state, axes)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def broadcast(out, tensor, shape, axes) do
     state = NxEigen.NIF.broadcast(tensor.data.state, shape, axes)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -79,7 +80,7 @@ defmodule NxEigen.Backend do
     # Convert config tuples to lists for NIF
     config_lists = Enum.map(config, &Tuple.to_list/1)
     state = NxEigen.NIF.pad(tensor.data.state, val, config_lists)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Reductions
@@ -95,7 +96,7 @@ defmodule NxEigen.Backend do
       # If keep_axes is true, the NIF returns a tensor with reduced dimensions,
       # but we need to reshape it to match out.shape (which has size-1 dimensions)
       state = if opts[:keep_axes], do: NxEigen.NIF.reshape(state, out.shape), else: state
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      %{out | data: %__MODULE__{state: state}}
     end
   end
 
@@ -109,7 +110,7 @@ defmodule NxEigen.Backend do
       state = apply(NxEigen.NIF, unquote(op), [tensor.data.state, axes])
       # If keep_axes is true, reshape to match out.shape
       state = if opts[:keep_axes], do: NxEigen.NIF.reshape(state, out.shape), else: state
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      %{out | data: %__MODULE__{state: state}}
     end
   end
 
@@ -126,7 +127,7 @@ defmodule NxEigen.Backend do
       # If keep_axes is true, reshape to match out.shape
       state = if opts[:keep_axes], do: NxEigen.NIF.reshape(state, out.shape), else: state
       # NIF returns int64, but we need to convert to the requested output type
-      result = %{out | data: %__MODULE__{state: state, id: make_ref()}, type: {:s, 64}}
+      result = %{out | data: %__MODULE__{state: state}, type: {:s, 64}}
       if out.type != {:s, 64} do
         as_type(out, result)
       else
@@ -141,7 +142,7 @@ defmodule NxEigen.Backend do
     # Convert tensor indices to integers and clamp them
     start_indices = clamp_indices(start_indices, tensor.shape, lengths)
     state = NxEigen.NIF.slice(tensor.data.state, start_indices, lengths, strides)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -152,7 +153,7 @@ defmodule NxEigen.Backend do
     # Convert tensor indices to integers and clamp them
     start_indices = clamp_indices(start_indices, tensor.shape, Tuple.to_list(slice.shape))
     state = NxEigen.NIF.put_slice(tensor.data.state, slice.data.state, start_indices)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -170,7 +171,7 @@ defmodule NxEigen.Backend do
     on_false = maybe_broadcast(on_false, out.shape)
 
     state = NxEigen.NIF.select(pred.data.state, on_true.data.state, on_false.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -187,7 +188,7 @@ defmodule NxEigen.Backend do
     [first_axis | _] = axes
 
     state = NxEigen.NIF.gather(tensor.data.state, indices.data.state, first_axis)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Linear Algebra
@@ -208,7 +209,7 @@ defmodule NxEigen.Backend do
       contract_axes2,
       batch_axes2
     )
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -265,7 +266,7 @@ defmodule NxEigen.Backend do
       state
     end
 
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -287,7 +288,7 @@ defmodule NxEigen.Backend do
       l = maybe_broadcast(l, out.shape)
       r = maybe_broadcast(r, out.shape)
       state = apply(NxEigen.NIF, unquote(op), [l.data.state, r.data.state])
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      %{out | data: %__MODULE__{state: state}}
     end
   end
 
@@ -303,14 +304,14 @@ defmodule NxEigen.Backend do
       l = maybe_broadcast(l, out.shape)
       r = maybe_broadcast(r, out.shape)
       state = apply(NxEigen.NIF, unquote(op), [l.data.state, r.data.state])
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      %{out | data: %__MODULE__{state: state}}
     end
   end
 
   @impl true
   def bitwise_not(out, tensor) do
     state = NxEigen.NIF.bitwise_not(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Logical ops (element-wise boolean operations)
@@ -326,7 +327,7 @@ defmodule NxEigen.Backend do
       l = maybe_broadcast(l, out.shape)
       r = maybe_broadcast(r, out.shape)
       state = apply(NxEigen.NIF, unquote(op), [l.data.state, r.data.state])
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      %{out | data: %__MODULE__{state: state}}
     end
   end
 
@@ -341,7 +342,7 @@ defmodule NxEigen.Backend do
       l = maybe_broadcast(l, out.shape)
       r = maybe_broadcast(r, out.shape)
       state = apply(NxEigen.NIF, unquote(op), [l.data.state, r.data.state])
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      %{out | data: %__MODULE__{state: state}}
     end
   end
 
@@ -387,7 +388,7 @@ defmodule NxEigen.Backend do
       # Auto-upcast integers to output float type
       tensor = maybe_upcast(tensor, out.type)
       state = apply(NxEigen.NIF, unquote(op), [tensor.data.state])
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      %{out | data: %__MODULE__{state: state}}
     end
   end
 
@@ -397,7 +398,7 @@ defmodule NxEigen.Backend do
     @impl true
     def unquote(op)(out, tensor) do
       state = apply(NxEigen.NIF, unquote(op), [tensor.data.state])
-      %{out | data: %__MODULE__{state: state, id: make_ref()}}
+      %{out | data: %__MODULE__{state: state}}
     end
   end
 
@@ -407,19 +408,19 @@ defmodule NxEigen.Backend do
     # Upcast to output type (may convert real to complex)
     tensor = maybe_upcast(tensor, out.type)
     state = NxEigen.NIF.conjugate(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def real(out, tensor) do
     state = NxEigen.NIF.real(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def imag(out, tensor) do
     state = NxEigen.NIF.imag(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Special handling for erf_inv, expm1, sigmoid (precision-sensitive, handled separately)
@@ -427,21 +428,21 @@ defmodule NxEigen.Backend do
   def erf_inv(out, tensor) do
     tensor = maybe_upcast(tensor, out.type)
     state = NxEigen.NIF.erf_inv(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def expm1(out, tensor) do
     tensor = maybe_upcast(tensor, out.type)
     state = NxEigen.NIF.expm1(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def sigmoid(out, tensor) do
     tensor = maybe_upcast(tensor, out.type)
     state = NxEigen.NIF.sigmoid(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Binary math ops
@@ -454,7 +455,7 @@ defmodule NxEigen.Backend do
     l = maybe_broadcast(l, out.shape)
     r = maybe_broadcast(r, out.shape)
     state = NxEigen.NIF.atan2(l.data.state, r.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Integer division ops
@@ -468,7 +469,7 @@ defmodule NxEigen.Backend do
     l = maybe_broadcast(l, out.shape)
     r = maybe_broadcast(r, out.shape)
     state = NxEigen.NIF.quotient(l.data.state, r.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -481,20 +482,20 @@ defmodule NxEigen.Backend do
     l = maybe_broadcast(l, out.shape)
     r = maybe_broadcast(r, out.shape)
     state = NxEigen.NIF.remainder(l.data.state, r.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Predicates
   @impl true
   def is_nan(out, tensor) do
     state = NxEigen.NIF.is_nan(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def is_infinity(out, tensor) do
     state = NxEigen.NIF.is_infinity(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Utility operations
@@ -506,20 +507,20 @@ defmodule NxEigen.Backend do
     min_val = Nx.to_number(min) * 1.0
     max_val = Nx.to_number(max) * 1.0
     state = NxEigen.NIF.clip(tensor.data.state, min_val, max_val)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def squeeze(out, tensor, _axes) do
     # Squeeze is just a reshape with size-1 dimensions removed
     state = NxEigen.NIF.reshape(tensor.data.state, out.shape)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def reverse(out, tensor, axes) do
     state = NxEigen.NIF.reverse(tensor.data.state, axes)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -528,7 +529,7 @@ defmodule NxEigen.Backend do
     tensors = Enum.map(tensors, &maybe_upcast(&1, out.type))
     states = Enum.map(tensors, & &1.data.state)
     state = NxEigen.NIF.concatenate(states, axis)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Sorting
@@ -537,7 +538,7 @@ defmodule NxEigen.Backend do
     axis = opts[:axis] || -1
     direction = if opts[:direction] == :desc, do: 1, else: 0
     state = NxEigen.NIF.sort(tensor.data.state, axis, direction)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -545,20 +546,20 @@ defmodule NxEigen.Backend do
     axis = opts[:axis] || -1
     direction = if opts[:direction] == :desc, do: 1, else: 0
     state = NxEigen.NIF.argsort(tensor.data.state, out.type, axis, direction)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Bit manipulation
   @impl true
   def population_count(out, tensor) do
     state = NxEigen.NIF.population_count(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def count_leading_zeros(out, tensor) do
     state = NxEigen.NIF.count_leading_zeros(tensor.data.state)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Backend infrastructure
@@ -624,14 +625,14 @@ defmodule NxEigen.Backend do
   @impl true
   def bitcast(out, tensor) do
     state = NxEigen.NIF.bitcast(tensor.data.state, out.type)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def stack(out, tensors, axis) do
     states = Enum.map(tensors, & &1.data.state)
     state = NxEigen.NIF.stack(states, axis)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Advanced indexing
@@ -645,7 +646,7 @@ defmodule NxEigen.Backend do
     tensor = maybe_upcast(tensor, out.type)
     updates = maybe_upcast(updates, out.type)
     state = NxEigen.NIF.indexed_add(tensor.data.state, indices.data.state, updates.data.state, axes)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -658,7 +659,7 @@ defmodule NxEigen.Backend do
     tensor = maybe_upcast(tensor, out.type)
     updates = maybe_upcast(updates, out.type)
     state = NxEigen.NIF.indexed_put(tensor.data.state, indices.data.state, updates.data.state, axes)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Custom reduce
@@ -672,28 +673,28 @@ defmodule NxEigen.Backend do
   def window_sum(out, tensor, window_dimensions, opts) do
     opts_list = convert_window_opts(opts)
     state = NxEigen.NIF.window_sum(tensor.data.state, window_dimensions, opts_list)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def window_product(out, tensor, window_dimensions, opts) do
     opts_list = convert_window_opts(opts)
     state = NxEigen.NIF.window_product(tensor.data.state, window_dimensions, opts_list)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def window_max(out, tensor, window_dimensions, opts) do
     opts_list = convert_window_opts(opts)
     state = NxEigen.NIF.window_max(tensor.data.state, window_dimensions, opts_list)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def window_min(out, tensor, window_dimensions, opts) do
     opts_list = convert_window_opts(opts)
     state = NxEigen.NIF.window_min(tensor.data.state, window_dimensions, opts_list)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -715,7 +716,7 @@ defmodule NxEigen.Backend do
       window_dimensions,
       opts_list
     )
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -728,7 +729,7 @@ defmodule NxEigen.Backend do
       window_dimensions,
       opts_list
     )
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # FFT operations
@@ -737,7 +738,7 @@ defmodule NxEigen.Backend do
     length = opts[:length]
     axis = opts[:axis] || -1
     state = NxEigen.NIF.fft(tensor.data.state, length, axis)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
@@ -745,7 +746,7 @@ defmodule NxEigen.Backend do
     length = opts[:length]
     axis = opts[:axis] || -1
     state = NxEigen.NIF.ifft(tensor.data.state, length, axis)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Convolution
@@ -755,7 +756,7 @@ defmodule NxEigen.Backend do
     tensor = ensure_backend(tensor)
     kernel = ensure_backend(kernel)
     state = NxEigen.NIF.conv(tensor.data.state, kernel.data.state, opts)
-    %{out | data: %__MODULE__{state: state, id: make_ref()}}
+    %{out | data: %__MODULE__{state: state}}
   end
 
   # Helper functions

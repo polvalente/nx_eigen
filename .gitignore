@@ -26,4 +26,4 @@ nx_eigen-*.tar
 /fftw-*
 /priv/libnx_eigen.so
 /cmake
-/sysroot/
+/sysroot
