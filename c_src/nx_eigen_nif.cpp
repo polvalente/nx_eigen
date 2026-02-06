@@ -3469,7 +3469,7 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
                 canonical_out_arr, canonical_out_shape, inv_output_perm);
             out_arr = std::move(transposed_arr);
           }
-
+        },
         tensor->data);
 
     return fine::Encoder<fine::ResourcePtr<EigenTensor>>::encode(env, result);
