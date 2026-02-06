@@ -3656,7 +3656,8 @@ fine::ResourcePtr<EigenTensor> eye_nif(ErlNifEnv *env, ScalarType type,
   // Check matrix_elements overflow
   size_t matrix_elements =
       static_cast<size_t>(rows) * static_cast<size_t>(cols);
-  if (cols > 0 && rows > static_cast<int>(SIZE_MAX / cols)) {
+  if (cols > 0 &&
+      static_cast<size_t>(rows) > SIZE_MAX / static_cast<size_t>(cols)) {
     throw std::runtime_error("Matrix dimensions overflow: too large");
   }
 
