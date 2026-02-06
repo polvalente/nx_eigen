@@ -3141,7 +3141,7 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
       throw std::runtime_error("conv requires at least 3D tensors");
     }
 
-    // Helper to compute inverse permutation
+    // Helper to compute inverse permutation (used for output permutation)
     auto invert_permutation =
         [](const std::vector<int64_t> &perm) -> std::vector<int64_t> {
       std::vector<int64_t> inv(perm.size());
@@ -3174,22 +3174,10 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
             ? kernel->shape
             : permute_shape(kernel->shape, opts.kernel_permutation);
 
-    // Compute inverse permutations for index mapping
-    std::vector<int64_t> inv_input_perm =
-        opts.input_permutation.empty()
-            ? std::vector<int64_t>()
-            : invert_permutation(opts.input_permutation);
-
-    std::vector<int64_t> inv_kernel_perm =
-        opts.kernel_permutation.empty()
-            ? std::vector<int64_t>()
-            : invert_permutation(opts.kernel_permutation);
-
     // Extract dimensions from logical shapes
     // Input: [batch, in_channels, spatial_dims...]
     // Kernel: [out_channels, in_channels/feature_groups, spatial_dims...]
     int64_t batch_size = logical_in_shape[0];
-    int64_t in_channels = logical_in_shape[1];
     int64_t out_channels = logical_kernel_shape[0];
 
     int spatial_dims = rank - 2;
@@ -3286,7 +3274,6 @@ static ERL_NIF_TERM conv_nif(ErlNifEnv *env, int argc,
 
           // Extract canonical dimensions
           int64_t batch_size_can = canonical_input_shape[0];
-          int64_t in_channels_can = canonical_input_shape[1];
           int64_t out_channels_can = canonical_kernel_shape[0];
           int64_t kernel_channels_can = canonical_kernel_shape[1];
 
@@ -3653,19 +3640,19 @@ fine::ResourcePtr<EigenTensor> eye_nif(ErlNifEnv *env, ScalarType type,
     batch_size *= shape[i];
   }
 
-  // Check matrix_elements overflow
-  size_t matrix_elements =
-      static_cast<size_t>(rows) * static_cast<size_t>(cols);
+  // Check matrix_elements overflow before multiplication
   if (cols > 0 &&
       static_cast<size_t>(rows) > SIZE_MAX / static_cast<size_t>(cols)) {
     throw std::runtime_error("Matrix dimensions overflow: too large");
   }
+  size_t matrix_elements =
+      static_cast<size_t>(rows) * static_cast<size_t>(cols);
 
-  // Check total_elements overflow
-  size_t total_elements = batch_size * matrix_elements;
+  // Check total_elements overflow before multiplication
   if (matrix_elements > 0 && batch_size > SIZE_MAX / matrix_elements) {
     throw std::runtime_error("Total tensor size overflow: too large");
   }
+  size_t total_elements = batch_size * matrix_elements;
 
   if (total_elements >
       static_cast<size_t>(std::numeric_limits<Eigen::Index>::max())) {
