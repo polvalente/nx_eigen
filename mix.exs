@@ -16,15 +16,16 @@ defmodule NxEigen.MixProject do
   end
 
   defp make_env do
-    env = %{}
+    %{}
+    |> forward_env("NX_EIGEN_FFT_LIB")
+    |> forward_env("NX_EIGEN_FFT_SO")
+  end
 
-    env =
-      case System.get_env("NX_EIGEN_FFT_LIB") do
-        nil -> env
-        val -> Map.put(env, "NX_EIGEN_FFT_LIB", val)
-      end
-
-    env
+  defp forward_env(env, var) do
+    case System.get_env(var) do
+      nil -> env
+      val -> Map.put(env, var, val)
+    end
   end
 
   # Run "mix help compile.app" to learn about applications.

@@ -5,9 +5,7 @@
 #include <string>
 #include <vector>
 
-#ifndef NX_EIGEN_DISABLE_FFTW
-#include <fftw3.h>
-#endif
+#include "nx_eigen_fft.h"
 
 // Supported scalar types for EigenTensor
 enum class ScalarType {
@@ -2888,9 +2886,7 @@ fine::ResourcePtr<EigenTensor> window_scatter_min_nif(
 }
 FINE_NIF(window_scatter_min_nif, 0);
 
-#ifndef NX_EIGEN_DISABLE_FFTW
-
-// ── FFTW-backed FFT helpers ──────────────────────────────────────────────────
+// ── FFT helpers (calls through pluggable nx_eigen_fft.h interface) ───────────
 
 // Compute stride / batch dimensions for operating along a single axis
 // of a multi-dimensional tensor stored in row-major (C) order.
@@ -2929,22 +2925,19 @@ static AxisGeometry axis_geometry(const std::vector<int64_t> &shape,
   return g;
 }
 
+enum class FftDirection { Forward, Inverse };
+
 // Run 1-D complex-to-complex FFT (forward or inverse) along one axis
 // of a flat complex<double> buffer, writing results into out_buf.
 // fft_length may differ from the axis size (zero-pad or truncate).
-static void fftw_along_axis(const std::complex<double> *in_buf,
-                            std::complex<double> *out_buf,
-                            const AxisGeometry &geom, int64_t fft_length,
-                            int sign /* FFTW_FORWARD or FFTW_BACKWARD */) {
+// Delegates each 1-D transform to the pluggable nx_eigen_fft interface.
+static void fft_along_axis(const std::complex<double> *in_buf,
+                           std::complex<double> *out_buf,
+                           const AxisGeometry &geom, int64_t fft_length,
+                           FftDirection direction) {
   // Temporary contiguous buffers for a single 1-D transform
   std::vector<std::complex<double>> in_vec(fft_length, {0.0, 0.0});
   std::vector<std::complex<double>> out_vec(fft_length);
-
-  fftw_plan plan = fftw_plan_dft_1d(
-      static_cast<int>(fft_length), reinterpret_cast<fftw_complex *>(in_vec.data()),
-      reinterpret_cast<fftw_complex *>(out_vec.data()), sign, FFTW_ESTIMATE);
-  if (!plan)
-    throw std::runtime_error("fftw_plan_dft_1d failed");
 
   int64_t copy_len = std::min(geom.n, fft_length);
 
@@ -2957,7 +2950,23 @@ static void fftw_along_axis(const std::complex<double> *in_buf,
       for (int64_t p = copy_len; p < fft_length; ++p)
         in_vec[p] = {0.0, 0.0};
 
-      fftw_execute(plan);
+      int rc;
+      if (direction == FftDirection::Forward)
+        rc = nx_eigen_fft_forward(
+            reinterpret_cast<const double *>(in_vec.data()),
+            reinterpret_cast<double *>(out_vec.data()),
+            static_cast<int>(fft_length));
+      else
+        rc = nx_eigen_fft_inverse(
+            reinterpret_cast<const double *>(in_vec.data()),
+            reinterpret_cast<double *>(out_vec.data()),
+            static_cast<int>(fft_length));
+
+      if (rc != 0)
+        throw std::runtime_error(
+            "FFT operation failed (rc=" + std::to_string(rc) +
+            "). Is FFT support compiled in? "
+            "See NX_EIGEN_FFT_LIB / NX_EIGEN_FFT_SO in the README.");
 
       // Scatter back
       for (int64_t p = 0; p < fft_length; ++p)
@@ -2965,7 +2974,6 @@ static void fftw_along_axis(const std::complex<double> *in_buf,
             out_vec[p];
     }
   }
-  fftw_destroy_plan(plan);
 }
 
 // Convert any EigenTensor variant to a flat vector<complex<double>>
@@ -3013,8 +3021,8 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
     out_elems *= d;
   std::vector<std::complex<double>> out_buf(out_elems);
 
-  fftw_along_axis(in_buf.data(), out_buf.data(), geom, fft_length,
-                  FFTW_FORWARD);
+  fft_along_axis(in_buf.data(), out_buf.data(), geom, fft_length,
+                 FftDirection::Forward);
 
   // Build result tensor as C128 (complex<double>)
   auto result = fine::make_resource<EigenTensor>();
@@ -3046,10 +3054,10 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
     out_elems *= d;
   std::vector<std::complex<double>> out_buf(out_elems);
 
-  fftw_along_axis(in_buf.data(), out_buf.data(), geom, fft_length,
-                  FFTW_BACKWARD);
+  fft_along_axis(in_buf.data(), out_buf.data(), geom, fft_length,
+                 FftDirection::Inverse);
 
-  // FFTW backward transform is unnormalised – divide by N
+  // The interface returns unnormalised IDFT – divide by N
   double inv_n = 1.0 / static_cast<double>(fft_length);
   for (size_t i = 0; i < out_elems; ++i)
     out_buf[i] *= inv_n;
@@ -3063,36 +3071,6 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   return result;
 }
 FINE_NIF(ifft_nif, 0);
-
-#else // NX_EIGEN_DISABLE_FFTW
-
-fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
-                                       fine::ResourcePtr<EigenTensor> tensor,
-                                       int64_t length, int64_t axis) {
-  (void)env;
-  (void)tensor;
-  (void)length;
-  (void)axis;
-  throw std::runtime_error(
-      "FFTW support is disabled at build time (NX_EIGEN_DISABLE_FFTW). "
-      "Install FFTW3 and rebuild without NX_EIGEN_FFT_LIB=none.");
-}
-FINE_NIF(fft_nif, 0);
-
-fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
-                                        fine::ResourcePtr<EigenTensor> tensor,
-                                        int64_t length, int64_t axis) {
-  (void)env;
-  (void)tensor;
-  (void)length;
-  (void)axis;
-  throw std::runtime_error(
-      "FFTW support is disabled at build time (NX_EIGEN_DISABLE_FFTW). "
-      "Install FFTW3 and rebuild without NX_EIGEN_FFT_LIB=none.");
-}
-FINE_NIF(ifft_nif, 0);
-
-#endif // NX_EIGEN_DISABLE_FFTW
 
 // Helper function to parse convolution options
 struct ConvOptions {
