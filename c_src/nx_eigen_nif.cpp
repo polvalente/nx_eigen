@@ -2976,6 +2976,17 @@ static void fft_along_axis(const std::complex<double> *in_buf,
   }
 }
 
+// Check if input tensor uses single precision (f32/c64)
+static bool is_single_precision(const EigenTensor &t) {
+  return std::visit(
+      [](const auto &arr) -> bool {
+        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
+        return std::is_same_v<Scalar, float> ||
+               std::is_same_v<Scalar, std::complex<float>>;
+      },
+      t.data);
+}
+
 // Convert any EigenTensor variant to a flat vector<complex<double>>
 static std::vector<std::complex<double>>
 to_complex128(const EigenTensor &t) {
@@ -3006,6 +3017,14 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
   (void)env;
   auto geom = axis_geometry(tensor->shape, axis);
   int64_t fft_length = length;
+  // FFT returns c64 for all inputs except f64/c128
+  bool use_single = !std::visit(
+      [](const auto &arr) -> bool {
+        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
+        return std::is_same_v<Scalar, double> ||
+               std::is_same_v<Scalar, std::complex<double>>;
+      },
+      tensor->data);
 
   // Convert input to complex<double>
   auto in_buf = to_complex128(*tensor);
@@ -3024,13 +3043,29 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
   fft_along_axis(in_buf.data(), out_buf.data(), geom, fft_length,
                  FftDirection::Forward);
 
-  // Build result tensor as C128 (complex<double>)
+  // Build result tensor with matching precision
   auto result = fine::make_resource<EigenTensor>();
   result->shape = out_shape;
-  auto &res_arr = result->data.emplace<FlatArray<std::complex<double>>>();
-  res_arr.resize(out_elems);
-  std::memcpy(res_arr.data(), out_buf.data(),
-              out_elems * sizeof(std::complex<double>));
+  
+  if (use_single) {
+    // Return c64 (complex<float>) for f32/c64 input
+    std::vector<std::complex<float>> out_buf_f32(out_elems);
+    for (size_t i = 0; i < out_elems; ++i)
+      out_buf_f32[i] = std::complex<float>(
+          static_cast<float>(out_buf[i].real()),
+          static_cast<float>(out_buf[i].imag()));
+    auto &res_arr = result->data.emplace<FlatArray<std::complex<float>>>();
+    res_arr.resize(out_elems);
+    std::memcpy(res_arr.data(), out_buf_f32.data(),
+                out_elems * sizeof(std::complex<float>));
+  } else {
+    // Return c128 (complex<double>) for f64/c128 input
+    auto &res_arr = result->data.emplace<FlatArray<std::complex<double>>>();
+    res_arr.resize(out_elems);
+    std::memcpy(res_arr.data(), out_buf.data(),
+                out_elems * sizeof(std::complex<double>));
+  }
+  
   return result;
 }
 FINE_NIF(fft_nif, 0);
@@ -3041,6 +3076,14 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   (void)env;
   auto geom = axis_geometry(tensor->shape, axis);
   int64_t fft_length = length;
+  // IFFT returns c64 for all inputs except f64/c128
+  bool use_single = !std::visit(
+      [](const auto &arr) -> bool {
+        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
+        return std::is_same_v<Scalar, double> ||
+               std::is_same_v<Scalar, std::complex<double>>;
+      },
+      tensor->data);
 
   auto in_buf = to_complex128(*tensor);
 
@@ -3062,12 +3105,29 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   for (size_t i = 0; i < out_elems; ++i)
     out_buf[i] *= inv_n;
 
+  // Build result tensor with matching precision
   auto result = fine::make_resource<EigenTensor>();
   result->shape = out_shape;
-  auto &res_arr = result->data.emplace<FlatArray<std::complex<double>>>();
-  res_arr.resize(out_elems);
-  std::memcpy(res_arr.data(), out_buf.data(),
-              out_elems * sizeof(std::complex<double>));
+  
+  if (use_single) {
+    // Return c64 (complex<float>) for f32/c64 input
+    std::vector<std::complex<float>> out_buf_f32(out_elems);
+    for (size_t i = 0; i < out_elems; ++i)
+      out_buf_f32[i] = std::complex<float>(
+          static_cast<float>(out_buf[i].real()),
+          static_cast<float>(out_buf[i].imag()));
+    auto &res_arr = result->data.emplace<FlatArray<std::complex<float>>>();
+    res_arr.resize(out_elems);
+    std::memcpy(res_arr.data(), out_buf_f32.data(),
+                out_elems * sizeof(std::complex<float>));
+  } else {
+    // Return c128 (complex<double>) for f64/c128 input
+    auto &res_arr = result->data.emplace<FlatArray<std::complex<double>>>();
+    res_arr.resize(out_elems);
+    std::memcpy(res_arr.data(), out_buf.data(),
+                out_elems * sizeof(std::complex<double>));
+  }
+  
   return result;
 }
 FINE_NIF(ifft_nif, 0);

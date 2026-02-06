@@ -37,13 +37,21 @@ LDFLAGS = -shared
 # Resolve FFT sources and link flags
 FFT_SRCS =
 FFT_LDFLAGS =
+FFT_CFLAGS =
 
 ifneq ($(NX_EIGEN_FFT_SO),)
   # Custom shared library – link directly against it
   FFT_LDFLAGS = $(NX_EIGEN_FFT_SO) -Wl,-rpath,'$$ORIGIN'
 else ifeq ($(NX_EIGEN_FFT_LIB),fftw)
   FFT_SRCS = c_src/nx_eigen_fft_fftw.cpp
-  FFT_LDFLAGS = -lfftw3
+  # Try pkg-config first (handles Homebrew installations properly)
+  PKG_CONFIG_FFTW3 := $(shell pkg-config --exists fftw3 2>/dev/null && echo yes)
+  ifeq ($(PKG_CONFIG_FFTW3),yes)
+    FFT_CFLAGS = $(shell pkg-config --cflags fftw3)
+    FFT_LDFLAGS = $(shell pkg-config --libs fftw3)
+  else
+    FFT_LDFLAGS = -lfftw3
+  endif
 else ifeq ($(NX_EIGEN_FFT_LIB),none)
   FFT_SRCS = c_src/nx_eigen_fft_none.cpp
 else
@@ -90,7 +98,7 @@ ifeq ($(USE_CMAKE),1)
 		$(if $(NX_EIGEN_FFT_SO),-DNX_EIGEN_FFT_SO=$(NX_EIGEN_FFT_SO),)
 	$(CMAKE) --build $(CMAKE_BUILD_DIR) --config $(CMAKE_BUILD_TYPE)
 else
-	$(CXX) $(CFLAGS) $(LDFLAGS) $(FFT_LDFLAGS) c_src/nx_eigen_nif.cpp $(FFT_SRCS) -o $(LIB_NAME)
+	$(CXX) $(CFLAGS) $(FFT_CFLAGS) $(LDFLAGS) $(FFT_LDFLAGS) c_src/nx_eigen_nif.cpp $(FFT_SRCS) -o $(LIB_NAME)
 endif
 
 clean:
