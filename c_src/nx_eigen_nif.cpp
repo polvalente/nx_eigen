@@ -3008,49 +3008,12 @@ static void fft_along_axis_t(const std::complex<T> *in_buf,
   }
 }
 
-// Convert complex EigenTensor to a flat vector<complex<T>>
-// Assumes input is already complex (upcasted in Elixir)
-template <typename T>
-static std::vector<std::complex<T>>
-to_complex(const EigenTensor &t) {
-  return std::visit(
-      [](const auto &arr) -> std::vector<std::complex<T>> {
-        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
-        size_t n = arr.size();
-        std::vector<std::complex<T>> out(n);
-        if constexpr (std::is_same_v<Scalar, std::complex<float>>) {
-          for (size_t i = 0; i < n; ++i)
-            out[i] = {static_cast<T>(arr(i).real()),
-                      static_cast<T>(arr(i).imag())};
-        } else if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
-          for (size_t i = 0; i < n; ++i)
-            out[i] = {static_cast<T>(arr(i).real()),
-                      static_cast<T>(arr(i).imag())};
-        } else {
-          // Should never reach here - input should be complex
-          for (size_t i = 0; i < n; ++i)
-            out[i] = {static_cast<T>(arr(i)), T(0)};
-        }
-        return out;
-      },
-      t.data);
-}
-
 fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
                                        fine::ResourcePtr<EigenTensor> tensor,
                                        int64_t length, int64_t axis) {
   (void)env;
   auto geom = axis_geometry(tensor->shape, axis);
   int64_t fft_length = length;
-
-  // Input is guaranteed to be complex (upcasted in Elixir)
-  // Just check precision: c64 (complex<float>) or c128 (complex<double>)
-  bool use_double = std::visit(
-      [](const auto &arr) -> bool {
-        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
-        return std::is_same_v<Scalar, std::complex<double>>;
-      },
-      tensor->data);
 
   // Build output shape (axis dimension becomes fft_length)
   auto out_shape = tensor->shape;
@@ -3065,24 +3028,26 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
   auto result = fine::make_resource<EigenTensor>();
   result->shape = out_shape;
 
-  if (use_double) {
-    auto in_buf = to_complex<double>(*tensor);
+  // Input is guaranteed to be complex (upcasted in Elixir)
+  // Get direct pointer to data - no copy needed
+  if (auto *c128_arr = std::get_if<FlatArray<std::complex<double>>>(&tensor->data)) {
     std::vector<std::complex<double>> out_buf(out_elems);
-    fft_along_axis_t<double>(in_buf.data(), out_buf.data(), geom, fft_length,
+    fft_along_axis_t<double>(c128_arr->data(), out_buf.data(), geom, fft_length,
                             FftDirection::Forward);
     auto &res_arr = result->data.emplace<FlatArray<std::complex<double>>>();
     res_arr.resize(out_elems);
     std::memcpy(res_arr.data(), out_buf.data(),
                 out_elems * sizeof(std::complex<double>));
-  } else {
-    auto in_buf = to_complex<float>(*tensor);
+  } else if (auto *c64_arr = std::get_if<FlatArray<std::complex<float>>>(&tensor->data)) {
     std::vector<std::complex<float>> out_buf(out_elems);
-    fft_along_axis_t<float>(in_buf.data(), out_buf.data(), geom, fft_length,
+    fft_along_axis_t<float>(c64_arr->data(), out_buf.data(), geom, fft_length,
                            FftDirection::Forward);
     auto &res_arr = result->data.emplace<FlatArray<std::complex<float>>>();
     res_arr.resize(out_elems);
     std::memcpy(res_arr.data(), out_buf.data(),
                 out_elems * sizeof(std::complex<float>));
+  } else {
+    throw std::runtime_error("FFT input must be complex (c64 or c128)");
   }
 
   return result;
@@ -3096,15 +3061,6 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   auto geom = axis_geometry(tensor->shape, axis);
   int64_t fft_length = length;
 
-  // Input is guaranteed to be complex (upcasted in Elixir)
-  // Just check precision: c64 (complex<float>) or c128 (complex<double>)
-  bool use_double = std::visit(
-      [](const auto &arr) -> bool {
-        using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
-        return std::is_same_v<Scalar, std::complex<double>>;
-      },
-      tensor->data);
-
   auto out_shape = tensor->shape;
   int64_t ndim = static_cast<int64_t>(out_shape.size());
   int64_t real_axis = axis < 0 ? axis + ndim : axis;
@@ -3117,10 +3073,11 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   auto result = fine::make_resource<EigenTensor>();
   result->shape = out_shape;
 
-  if (use_double) {
-    auto in_buf = to_complex<double>(*tensor);
+  // Input is guaranteed to be complex (upcasted in Elixir)
+  // Get direct pointer to data - no copy needed
+  if (auto *c128_arr = std::get_if<FlatArray<std::complex<double>>>(&tensor->data)) {
     std::vector<std::complex<double>> out_buf(out_elems);
-    fft_along_axis_t<double>(in_buf.data(), out_buf.data(), geom, fft_length,
+    fft_along_axis_t<double>(c128_arr->data(), out_buf.data(), geom, fft_length,
                             FftDirection::Inverse);
     // The interface returns unnormalised IDFT – divide by N
     double inv_n = 1.0 / static_cast<double>(fft_length);
@@ -3130,10 +3087,9 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
     res_arr.resize(out_elems);
     std::memcpy(res_arr.data(), out_buf.data(),
                 out_elems * sizeof(std::complex<double>));
-  } else {
-    auto in_buf = to_complex<float>(*tensor);
+  } else if (auto *c64_arr = std::get_if<FlatArray<std::complex<float>>>(&tensor->data)) {
     std::vector<std::complex<float>> out_buf(out_elems);
-    fft_along_axis_t<float>(in_buf.data(), out_buf.data(), geom, fft_length,
+    fft_along_axis_t<float>(c64_arr->data(), out_buf.data(), geom, fft_length,
                            FftDirection::Inverse);
     // The interface returns unnormalised IDFT – divide by N
     float inv_n = 1.0f / static_cast<float>(fft_length);
@@ -3143,6 +3099,8 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
     res_arr.resize(out_elems);
     std::memcpy(res_arr.data(), out_buf.data(),
                 out_elems * sizeof(std::complex<float>));
+  } else {
+    throw std::runtime_error("IFFT input must be complex (c64 or c128)");
   }
 
   return result;
