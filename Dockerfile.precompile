@@ -21,32 +21,32 @@ RUN apt-get update && apt-get install -y \
     autoconf \
     && rm -rf /var/lib/apt/lists/*
 
-# Build FFTW for cross-compilation targets
+# Build FFTW shared libraries for cross-compilation targets
 RUN cd /tmp && \
     wget http://www.fftw.org/fftw-3.3.10.tar.gz && \
     tar xzf fftw-3.3.10.tar.gz && \
     # Build for aarch64 (double precision)
     cd fftw-3.3.10 && \
     ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
-      --enable-static --disable-shared CC=aarch64-linux-gnu-gcc && \
+      --enable-shared --disable-static CC=aarch64-linux-gnu-gcc && \
     make -j$(nproc) && \
     make install && \
     # Build for aarch64 (single precision)
     make clean && \
     ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
-      --enable-static --disable-shared --enable-single CC=aarch64-linux-gnu-gcc && \
+      --enable-shared --disable-static --enable-single CC=aarch64-linux-gnu-gcc && \
     make -j$(nproc) && \
     make install && \
     # Build for riscv64 (double precision)
     make clean && \
     ./configure --host=riscv64-linux-gnu --prefix=/usr/riscv64-linux-gnu \
-      --enable-static --disable-shared CC=riscv64-linux-gnu-gcc && \
+      --enable-shared --disable-static CC=riscv64-linux-gnu-gcc && \
     make -j$(nproc) && \
     make install && \
     # Build for riscv64 (single precision)
     make clean && \
     ./configure --host=riscv64-linux-gnu --prefix=/usr/riscv64-linux-gnu \
-      --enable-static --disable-shared --enable-single CC=riscv64-linux-gnu-gcc && \
+      --enable-shared --disable-static --enable-single CC=riscv64-linux-gnu-gcc && \
     make -j$(nproc) && \
     make install && \
     # Clean up
