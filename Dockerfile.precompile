@@ -1,9 +1,6 @@
 # Dockerfile for cross-compiling nx_eigen NIFs
 # This provides a complete environment with all cross-compilation toolchains
-ARG ERLANG_VERSION=27.2.1
-ARG ELIXIR_VERSION=1.18.1
-
-FROM hexpm/elixir:${ELIXIR_VERSION}-erlang-${ERLANG_VERSION}-debian-bookworm-20250101-slim
+FROM hexpm/elixir:1.18.1-erlang-27.3-debian-bullseye-20260112-slim
 
 # Install native and cross-compilation toolchains
 RUN apt-get update && apt-get install -y \
