@@ -122,7 +122,7 @@ ifeq ($(USE_CMAKE),1)
 		$(if $(NX_EIGEN_FFT_SO),-DNX_EIGEN_FFT_SO=$(NX_EIGEN_FFT_SO),)
 	$(CMAKE) --build $(CMAKE_BUILD_DIR) --config $(CMAKE_BUILD_TYPE) --parallel
 else
-	$(CXX) $(CFLAGS) $(FFT_CFLAGS) $(LDFLAGS) $(FFT_LDFLAGS) c_src/nx_eigen_nif.cpp $(FFT_SRCS) -o $(LIB_NAME)
+	$(CXX) $(CFLAGS) $(FFT_CFLAGS) c_src/nx_eigen_nif.cpp $(FFT_SRCS) $(LDFLAGS) $(FFT_LDFLAGS) -o $(LIB_NAME)
 endif
 
 clean:

@@ -39,7 +39,6 @@ RUN mix deps.get
 
 COPY lib ./lib
 COPY test ./test
-COPY checksum.exs ./
 
 # By default, run tests
 # The precompiled binary should be mounted to priv/libnx_eigen.so before running this
