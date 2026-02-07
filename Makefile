@@ -62,7 +62,12 @@ else ifeq ($(NX_EIGEN_FFT_LIB),fftw)
         SYSROOT ?= /usr/$(CROSSCOMPILE:%-=%)
       endif
       FFT_CFLAGS = -I$(SYSROOT)/include
-      FFT_LDFLAGS = -L$(SYSROOT)/lib -lfftw3 -lfftw3f
+      # Try static libraries first, fall back to dynamic
+      ifneq ($(wildcard $(SYSROOT)/lib/libfftw3.a),)
+        FFT_LDFLAGS = $(SYSROOT)/lib/libfftw3.a $(SYSROOT)/lib/libfftw3f.a
+      else
+        FFT_LDFLAGS = -L$(SYSROOT)/lib -lfftw3 -lfftw3f
+      endif
     else
       # Default: assume system libraries
       FFT_LDFLAGS = -lfftw3 -lfftw3f
