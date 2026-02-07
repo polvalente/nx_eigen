@@ -2,7 +2,7 @@ defmodule NxEigen.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/YOUR_USERNAME/nx_eigen"  # TODO: Update with your GitHub repo URL
+  @source_url "https://github.com/polvalente/nx_eigen"
 
   def project do
     [
@@ -18,10 +18,10 @@ defmodule NxEigen.MixProject do
 
       # Precompilation configuration
       make_precompiler: {:nif, CCPrecompiler},
-      make_precompiler_url: "#{@source_url}/releases/download/v#{@version}/@{artefact_filename}",
+      make_precompiler_url: "#{@source_url}/releases/download/v#{@version}/{artefact_filename}",
       make_precompiler_filename: "libnx_eigen",
       make_precompiler_priv_paths: ["libnx_eigen.so"],
-      make_precompiler_nif_versions: [versions: ["2.15", "2.16", "2.17"]],
+      make_precompiler_nif_versions: [versions: ["2.16", "2.17"]],
       cc_precompiler: [
         cleanup: "clean",
         cmake_lists_path: "CMakeLists.txt",
