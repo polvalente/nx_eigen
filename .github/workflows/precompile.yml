@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  linux:
-    name: Linux (Docker cross-compile)
+  linux-x86_64:
+    name: Linux (x86_64)
     runs-on: ubuntu-22.04
     env:
       MIX_ENV: prod
@@ -20,16 +20,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Install Erlang & Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.1"
 
-      - name: Build cross-compilation Docker image
+      - name: Install system dependencies
         run: |
-          docker buildx build \
-            --file Dockerfile.precompile \
-            --tag nx_eigen_builder \
-            --load \
-            .
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libfftw3-dev
 
       - name: Restore Eigen cache
         uses: actions/cache@v4
@@ -37,35 +39,87 @@ jobs:
           path: eigen-3.4.0
           key: eigen-3.4.0
 
-      - name: Cross-compile all Linux targets in Docker
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/work" \
-            -w /work \
-            -e MIX_ENV=prod \
-            -e ELIXIR_MAKE_CACHE_DIR=/work/cache \
-            nx_eigen_builder \
-            bash -c "
-              mix local.hex --force && \
-              mix local.rebar --force && \
-              mix deps.get && \
-              mkdir -p cache && \
-              mix elixir_make.precompile
-            "
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-x86_64-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-x86_64-mix-
 
-      - name: Run tests (native x86_64)
+      - name: Install dependencies
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/work" \
-            -w /work \
-            -e MIX_ENV=test \
-            nx_eigen_builder \
-            bash -c "
-              mix local.hex --force && \
-              mix local.rebar --force && \
-              mix deps.get && \
-              mix test
-            "
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Run tests
+        run: mix test
+
+      - name: Precompile NIFs
+        run: |
+          mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
+          mix elixir_make.precompile
+
+      - name: Upload precompiled artifacts
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: cache/*.tar.gz
+
+  linux-aarch64:
+    name: Linux (aarch64)
+    runs-on: ubuntu-22.04-arm
+    env:
+      MIX_ENV: prod
+      ELIXIR_MAKE_CACHE_DIR: ${{ github.workspace }}/cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Erlang & Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.1"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libfftw3-dev
+
+      - name: Restore Eigen cache
+        uses: actions/cache@v4
+        with:
+          path: eigen-3.4.0
+          key: eigen-3.4.0
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-aarch64-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-aarch64-mix-
+
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Run tests
+        run: mix test
+
+      - name: Precompile NIFs
+        run: |
+          mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
+          mix elixir_make.precompile
 
       - name: Upload precompiled artifacts
         uses: softprops/action-gh-release@v2

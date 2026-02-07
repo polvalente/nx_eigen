@@ -9,9 +9,11 @@ NxEigen uses dynamic linking for FFTW. Users need to have FFTW installed on thei
 - macOS: Homebrew (`brew install fftw`)
 - Or use our precompiled binaries which work with system-installed FFTW
 
-## Quick Start with Docker
+## Building Locally
 
-The easiest way to cross-compile for Linux is using Docker:
+### Quick Start with Docker (Local Development)
+
+For local cross-compilation, use Docker:
 
 ```bash
 # Build and precompile all Linux targets
@@ -26,6 +28,18 @@ The Docker approach:
 - Handles FFTW dependencies automatically
 - Works on macOS, Linux, and Windows (with WSL)
 - Cross-compiles for x86_64 and aarch64 Linux
+
+### Native Build (macOS or Linux)
+
+For native builds on your current platform:
+
+```bash
+# Ensure FFTW is installed
+# macOS: brew install fftw
+# Linux: sudo apt-get install libfftw3-dev
+
+./scripts/precompile.sh
+```
 
 ## Supported Targets
 
@@ -64,11 +78,23 @@ Without these variables, the generic `aarch64-linux-gnu` binary will be used (wh
 
 See [ARDUINO_UNO_Q_QUICKSTART.md](ARDUINO_UNO_Q_QUICKSTART.md) for setup instructions.
 
-## Building Precompiled Binaries
+## CI/CD Pipeline
 
-### Automatic (via GitHub Actions)
+### Automatic Builds (GitHub Actions)
 
-Precompiled binaries are automatically built when you push a version tag:
+Precompiled binaries are automatically built on native runners when you push a version tag:
+
+**Linux builds**:
+- `x86_64`: Runs on `ubuntu-22.04` (native x86_64)
+- `aarch64`: Runs on `ubuntu-22.04-arm` (native ARM64)
+
+**macOS builds**:
+- `x86_64`: Runs on `macos-13` (native Intel)
+- `aarch64`: Runs on `macos-14` (native Apple Silicon)
+
+All builds use native architecture runners for maximum performance and reliability.
+
+To trigger a build:
 
 ```bash
 git tag v0.1.0
