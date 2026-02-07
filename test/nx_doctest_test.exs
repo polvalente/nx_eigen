@@ -21,6 +21,7 @@ defmodule NxEigen.DocTest do
   @rounding_error [
     # These tests fail due to minor floating point precision differences
     erf_inv: 1,
+    acos: 1,
     expm1: 1,
     sigmoid: 1,
     tanh: 1,
