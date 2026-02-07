@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: false
+        default: 'dev'
 
 permissions:
   contents: write
@@ -54,17 +60,36 @@ jobs:
           mix local.rebar --force
           mix deps.get
 
-      - name: Run tests
-        run: mix test
-
       - name: Precompile NIFs
         run: |
           mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
           mix elixir_make.precompile
 
+      - name: Test precompiled artifact
+        env:
+          MIX_ENV: test
+        run: |
+          rm -f priv/libnx_eigen.so
+
+          TARBALL=$(ls ${ELIXIR_MAKE_CACHE_DIR}/*.tar.gz | head -n 1)
+          echo "Testing precompiled artifact: ${TARBALL}"
+          TMP_DIR=$(mktemp -d)
+          tar -xzf "${TARBALL}" -C "${TMP_DIR}"
+          SO_FILE=$(find "${TMP_DIR}" -name "libnx_eigen.so" -type f | head -n 1)
+          if [ -z "${SO_FILE}" ]; then
+            echo "ERROR: libnx_eigen.so not found in tarball"
+            exit 1
+          fi
+          mkdir -p priv
+          cp "${SO_FILE}" priv/libnx_eigen.so
+          touch priv/libnx_eigen.so
+          rm -rf "${TMP_DIR}"
+
+          mix test
+
       - name: Upload precompiled artifacts
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch'
         with:
           files: cache/*.tar.gz
 
@@ -113,17 +138,36 @@ jobs:
           mix local.rebar --force
           mix deps.get
 
-      - name: Run tests
-        run: mix test
-
       - name: Precompile NIFs
         run: |
           mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
           mix elixir_make.precompile
 
+      - name: Test precompiled artifact
+        env:
+          MIX_ENV: test
+        run: |
+          rm -f priv/libnx_eigen.so
+
+          TARBALL=$(ls ${ELIXIR_MAKE_CACHE_DIR}/*.tar.gz | head -n 1)
+          echo "Testing precompiled artifact: ${TARBALL}"
+          TMP_DIR=$(mktemp -d)
+          tar -xzf "${TARBALL}" -C "${TMP_DIR}"
+          SO_FILE=$(find "${TMP_DIR}" -name "libnx_eigen.so" -type f | head -n 1)
+          if [ -z "${SO_FILE}" ]; then
+            echo "ERROR: libnx_eigen.so not found in tarball"
+            exit 1
+          fi
+          mkdir -p priv
+          cp "${SO_FILE}" priv/libnx_eigen.so
+          touch priv/libnx_eigen.so
+          rm -rf "${TMP_DIR}"
+
+          mix test
+
       - name: Upload precompiled artifacts
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch'
         with:
           files: cache/*.tar.gz
 
@@ -171,9 +215,31 @@ jobs:
           # macOS 14 is ARM64 - will build for arm64 only (native)
           mix elixir_make.precompile
 
+      - name: Test precompiled artifact
+        env:
+          MIX_ENV: test
+        run: |
+          rm -f priv/libnx_eigen.so
+
+          TARBALL=$(ls ${ELIXIR_MAKE_CACHE_DIR}/*.tar.gz | head -n 1)
+          echo "Testing precompiled artifact: ${TARBALL}"
+          TMP_DIR=$(mktemp -d)
+          tar -xzf "${TARBALL}" -C "${TMP_DIR}"
+          SO_FILE=$(find "${TMP_DIR}" -name "libnx_eigen.so" -type f | head -n 1)
+          if [ -z "${SO_FILE}" ]; then
+            echo "ERROR: libnx_eigen.so not found in tarball"
+            exit 1
+          fi
+          mkdir -p priv
+          cp "${SO_FILE}" priv/libnx_eigen.so
+          touch priv/libnx_eigen.so
+          rm -rf "${TMP_DIR}"
+
+          mix test
+
       - name: Upload precompiled artifacts
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch'
         with:
           files: cache/*.tar.gz
 
@@ -222,8 +288,30 @@ jobs:
           # macOS 13 is x86_64 - will build for x86_64 only (native)
           mix elixir_make.precompile
 
+      - name: Test precompiled artifact
+        env:
+          MIX_ENV: test
+        run: |
+          rm -f priv/libnx_eigen.so
+
+          TARBALL=$(ls ${ELIXIR_MAKE_CACHE_DIR}/*.tar.gz | head -n 1)
+          echo "Testing precompiled artifact: ${TARBALL}"
+          TMP_DIR=$(mktemp -d)
+          tar -xzf "${TARBALL}" -C "${TMP_DIR}"
+          SO_FILE=$(find "${TMP_DIR}" -name "libnx_eigen.so" -type f | head -n 1)
+          if [ -z "${SO_FILE}" ]; then
+            echo "ERROR: libnx_eigen.so not found in tarball"
+            exit 1
+          fi
+          mkdir -p priv
+          cp "${SO_FILE}" priv/libnx_eigen.so
+          touch priv/libnx_eigen.so
+          rm -rf "${TMP_DIR}"
+
+          mix test
+
       - name: Upload precompiled artifacts
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch'
         with:
           files: cache/*.tar.gz
