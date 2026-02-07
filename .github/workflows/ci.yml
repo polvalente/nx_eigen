@@ -187,7 +187,7 @@ jobs:
 
   test-macos-x86:
     name: Test on macOS (x86_64)
-    runs-on: macos-13
+    runs-on: macos-15-intel
     env:
       MIX_ENV: test
 

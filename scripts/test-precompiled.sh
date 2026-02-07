@@ -166,7 +166,7 @@ main() {
     log_info "Starting precompiled binary testing"
     log_info "Project root: ${PROJECT_ROOT}"
     log_info "Cache directory: ${CACHE_DIR}"
-    log_info ""
+    log_info ""gs
 
     # Check prerequisites
     check_docker || exit 1
