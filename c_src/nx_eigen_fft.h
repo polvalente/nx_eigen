@@ -14,7 +14,7 @@
 //
 //     [re_0, im_0, re_1, im_1, ..., re_{n-1}, im_{n-1}]
 //
-// so the total buffer size is  2 * n  doubles.
+// so the total buffer size is  2 * n  floats/doubles.
 //
 // • nx_eigen_fft_forward  performs the DFT   (forward, unnormalised).
 // • nx_eigen_fft_inverse  performs the IDFT  (backward, unnormalised).
