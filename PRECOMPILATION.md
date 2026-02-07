@@ -42,18 +42,6 @@ The Docker approach:
 - Multi-architecture support: `docker buildx create --use`
 - QEMU for non-native architectures (usually pre-installed)
 
-### Native Build (macOS or Linux)
-
-For native builds on your current platform:
-
-```bash
-# Ensure FFTW is installed
-# macOS: brew install fftw
-# Linux: sudo apt-get install libfftw3-dev
-
-./scripts/precompile.sh
-```
-
 ## Supported Targets
 
 ### Linux (Docker-based builds)
