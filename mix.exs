@@ -23,7 +23,10 @@ defmodule NxEigen.MixProject do
       make_precompiler_priv_paths: ["libnx_eigen.so"],
       make_precompiler_nif_versions: [versions: ["2.15", "2.16", "2.17"]],
       cc_precompiler: [
-        cleanup: "clean"
+        cleanup: "clean",
+        cmake_lists_path: "CMakeLists.txt",
+        cmake_build_type: "Release",
+        cmake_flags: ["-DNX_EIGEN_FFT_LIB=fftw"]
       ],
       cc_precompile: cc_precompile(),
 
@@ -58,7 +61,7 @@ defmodule NxEigen.MixProject do
     [
       {:nx, "~> 0.10"},
       {:elixir_make, "~> 0.8", runtime: false},
-      {:cc_precompiler, "~> 0.1.0", runtime: false, github: "cocoa-xu/cc_precompiler"},
+      {:cc_precompiler, "~> 0.1", runtime: false},
       {:fine, "~> 0.1.0"}
     ]
   end
@@ -83,18 +86,101 @@ defmodule NxEigen.MixProject do
   defp cc_precompile do
     [
       compilers: %{
-        # Linux targets - only build for current architecture
-        {:unix, :linux} => linux_targets(),
-        # macOS targets - only build for current architecture
+        # Linux targets - will build only current architecture by default
+        {:unix, :linux} => fn ->
+          linux_targets_at_compile_time()
+        end,
+        # macOS targets
         {:unix, :darwin} => macos_targets()
       }
     ]
   end
 
-  # On Linux, build for the current architecture using native compilation
-  # Using gcc/g++ without cross-compilation prefix for native builds
-  # For local cross-compilation, use Docker (see scripts/precompile-docker.sh)
-  defp linux_targets do
+  # On Linux, determine targets at compile time (not at project definition time)
+  # This avoids Mix caching issues
+  defp linux_targets_at_compile_time do
+    # Check if specific target is requested (e.g., from Docker)
+    target = System.get_env("PRECOMPILE_TARGET")
+
+    case target do
+      nil ->
+        # Build for current architecture only
+        native_linux_target()
+
+      "aarch64-arduino-uno-q-linux-gnu" ->
+        # Arduino Uno Q optimized target (ARM64 with specific flags)
+        # Return ONLY this target, not the base aarch64-linux-gnu
+        %{
+          "aarch64-arduino-uno-q-linux-gnu" => {
+            "gcc",
+            "g++",
+            "<%= cc %> -march=armv8-a+crypto+crc -mtune=cortex-a53 -mfix-cortex-a53-835769 -mfix-cortex-a53-843419",
+            "<%= cxx %> -march=armv8-a+crypto+crc -mtune=cortex-a53 -mfix-cortex-a53-835769 -mfix-cortex-a53-843419"
+          }
+        }
+
+      target ->
+        # Build for specific target
+        case target do
+          "x86_64-linux-gnu" ->
+            %{
+              "x86_64-linux-gnu" => {
+                "gcc",
+                "g++",
+                "<%= cc %>",
+                "<%= cxx %>"
+              }
+            }
+
+          "aarch64-linux-gnu" ->
+            %{
+              "aarch64-linux-gnu" => {
+                "gcc",
+                "g++",
+                "<%= cc %>",
+                "<%= cxx %>"
+              }
+            }
+
+          "riscv64-linux-gnu" ->
+            %{
+              "riscv64-linux-gnu" => {
+                "gcc",
+                "g++",
+                "<%= cc %>",
+                "<%= cxx %>"
+              }
+            }
+
+          "x86_64-linux-musl" ->
+            %{
+              "x86_64-linux-musl" => {
+                "zig cc -target x86_64-linux-musl",
+                "zig c++ -target x86_64-linux-musl",
+                "<%= cc %>",
+                "<%= cxx %>"
+              }
+            }
+
+          "aarch64-linux-musl" ->
+            %{
+              "aarch64-linux-musl" => {
+                "zig cc -target aarch64-linux-musl",
+                "zig c++ -target aarch64-linux-musl",
+                "<%= cc %>",
+                "<%= cxx %>"
+              }
+            }
+
+          _ ->
+            IO.warn("Unknown PRECOMPILE_TARGET: #{target}, falling back to native")
+            native_linux_target()
+        end
+    end
+  end
+
+  # Native Linux target based on current architecture
+  defp native_linux_target do
     case :erlang.system_info(:system_architecture) |> to_string() do
       "x86_64" <> _ ->
         %{

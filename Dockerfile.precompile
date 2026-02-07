@@ -1,56 +1,34 @@
-# Dockerfile for cross-compiling nx_eigen NIFs
-# This provides a complete environment with all cross-compilation toolchains
+# Dockerfile for native compilation of nx_eigen NIFs
+# This builds natively for each target platform using Docker multi-arch support
 FROM hexpm/elixir:1.18.1-erlang-27.3-debian-bullseye-20260112-slim
 
-# Install native and cross-compilation toolchains
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+
+# Install build tools and FFTW (both double and single precision)
 RUN apt-get update && apt-get install -y \
     build-essential \
+    ccache \
     curl \
     git \
     pkg-config \
     wget \
-    # Native FFTW
+    binutils \
     libfftw3-dev \
-    # Cross-compilation toolchains
-    gcc-aarch64-linux-gnu \
-    g++-aarch64-linux-gnu \
-    gcc-riscv64-linux-gnu \
-    g++-riscv64-linux-gnu \
-    # For building FFTW
-    automake \
-    autoconf \
+    libfftw3-3 \
+    libfftw3-single3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Build FFTW shared libraries for cross-compilation targets
-RUN cd /tmp && \
-    wget http://www.fftw.org/fftw-3.3.10.tar.gz && \
-    tar xzf fftw-3.3.10.tar.gz && \
-    # Build for aarch64 (double precision)
-    cd fftw-3.3.10 && \
-    ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
-      --enable-shared --disable-static CC=aarch64-linux-gnu-gcc && \
-    make -j$(nproc) && \
-    make install && \
-    # Build for aarch64 (single precision)
-    make clean && \
-    ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
-      --enable-shared --disable-static --enable-single CC=aarch64-linux-gnu-gcc && \
-    make -j$(nproc) && \
-    make install && \
-    # Build for riscv64 (double precision)
-    make clean && \
-    ./configure --host=riscv64-linux-gnu --prefix=/usr/riscv64-linux-gnu \
-      --enable-shared --disable-static CC=riscv64-linux-gnu-gcc && \
-    make -j$(nproc) && \
-    make install && \
-    # Build for riscv64 (single precision)
-    make clean && \
-    ./configure --host=riscv64-linux-gnu --prefix=/usr/riscv64-linux-gnu \
-      --enable-shared --disable-static --enable-single CC=riscv64-linux-gnu-gcc && \
-    make -j$(nproc) && \
-    make install && \
-    # Clean up
-    cd /tmp && rm -rf fftw-3.3.10*
+# Install newer CMake (Debian Bullseye has 3.18, we need 3.20+)
+RUN wget -q https://github.com/Kitware/CMake/releases/download/v3.27.9/cmake-3.27.9-linux-$(uname -m).tar.gz && \
+    tar -xzf cmake-3.27.9-linux-$(uname -m).tar.gz -C /usr/local --strip-components=1 && \
+    rm cmake-3.27.9-linux-$(uname -m).tar.gz && \
+    cmake --version
+
+# Display platform information for debugging
+RUN echo "Building on ${BUILDPLATFORM} for ${TARGETPLATFORM}" && \
+    echo "Architecture: $(uname -m)" && \
+    gcc --version
 
 WORKDIR /work
 
@@ -61,5 +39,12 @@ RUN mix local.hex --force && \
 # Set environment for precompilation
 ENV MIX_ENV=prod
 ENV ELIXIR_MAKE_CACHE_DIR=/work/cache
+
+# Configure ccache for optimal performance
+ENV CCACHE_DIR=/work/.ccache
+ENV CCACHE_COMPRESS=1
+ENV CCACHE_COMPRESSLEVEL=6
+ENV CCACHE_MAXSIZE=1G
+RUN mkdir -p /work/.ccache
 
 CMD ["/bin/bash"]

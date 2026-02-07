@@ -1,0 +1,54 @@
+# Dockerfile for testing precompiled nx_eigen binaries
+# This dockerfile loads a precompiled binary and runs the test suite
+# to verify the binary works correctly on the target platform
+
+ARG BASE_IMAGE=hexpm/elixir:1.18.1-erlang-27.3-debian-bullseye-20260112-slim
+FROM ${BASE_IMAGE}
+
+ARG TARGETPLATFORM
+ARG PRECOMPILE_TARGET
+
+# Install runtime dependencies (FFTW libraries and Git for fetching deps)
+# Detect if this is Alpine or Debian and use appropriate package manager
+RUN if [ -f /etc/alpine-release ]; then \
+        echo "Installing dependencies on Alpine..." && \
+        apk add --no-cache fftw fftw-single-libs git; \
+    else \
+        echo "Installing dependencies on Debian..." && \
+        apt-get update && apt-get install -y \
+            libfftw3-double3 \
+            libfftw3-single3 \
+            git \
+            && rm -rf /var/lib/apt/lists/* \
+            && ldconfig; \
+    fi
+
+# Display platform information for debugging
+RUN echo "Testing on ${TARGETPLATFORM} for ${PRECOMPILE_TARGET}" && \
+    echo "Architecture: $(uname -m)" && \
+    echo "FFTW libraries installed:" && \
+    (ldconfig -p | grep fftw || echo "No FFTW libraries found in cache")
+
+WORKDIR /work
+
+# Install Hex and Rebar
+RUN mix local.hex --force && \
+    mix local.rebar --force
+
+# Copy project files (excluding cache with precompiled binaries)
+COPY mix.exs mix.lock ./
+COPY lib ./lib
+COPY test ./test
+COPY checksum.exs ./
+
+# Create priv directory for the precompiled .so file
+# The precompiled binary will be mounted at runtime to priv/libnx_eigen.so
+RUN mkdir -p priv
+
+# Install dependencies in test environment
+ENV MIX_ENV=test
+RUN mix deps.get
+
+# By default, run tests
+# The precompiled binary should be mounted to priv/libnx_eigen.so before running this
+CMD ["sh", "-c", "echo 'Checking for precompiled binary...' && ls -lh priv/ && echo 'Running tests...' && mix test"]

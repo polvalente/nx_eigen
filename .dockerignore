@@ -10,13 +10,16 @@
 /cache/
 /cmake-build/
 
+# Keep ccache for faster rebuilds
+# /.ccache/
+
 # Documentation
 /doc/
 *.md
 LICENSE
 
-# Test files
-/test/
+# Test files (kept for Dockerfile.test, small enough to not impact build times)
+# /test/
 
 # IDE
 .vscode/

@@ -398,6 +398,7 @@ Copyright (c) 2025
 
 - **[Arduino Uno Q Setup](ARDUINO_UNO_Q_QUICKSTART.md)** - Arduino Uno Q quick start guide
 - **[Precompilation Guide](PRECOMPILATION.md)** - Building precompiled binaries
+- **[Testing Precompiled Binaries](TESTING_PRECOMPILED.md)** - Testing precompiled binaries
 - **[Documentation Index](DOCUMENTATION_INDEX.md)** - Complete documentation overview
 
 ### API Documentation

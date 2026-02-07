@@ -10,6 +10,13 @@ set(FINE_INCLUDE "" CACHE PATH "Path to Fine C include directory (contains fine.
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Enable ccache if available to speed up rebuilds
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+  set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+  message(STATUS "Using ccache for compilation")
+endif()
+
 add_library(nx_eigen MODULE c_src/nx_eigen_nif.cpp)
 set_target_properties(nx_eigen PROPERTIES
   OUTPUT_NAME "nx_eigen"   # -> libnx_eigen.*
@@ -26,6 +33,11 @@ target_compile_options(nx_eigen PRIVATE -O3)
 target_compile_definitions(nx_eigen PRIVATE EIGEN_MPL2_ONLY)
 set_target_properties(nx_eigen PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Strip symbols in Release builds to reduce binary size
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  target_link_options(nx_eigen PRIVATE -s)
+endif()
+
 if(ERL_INCLUDE_DIR STREQUAL "")
   message(FATAL_ERROR "ERL_INCLUDE_DIR is required (set it to your erts-*/include directory).")
 endif()
@@ -40,6 +52,16 @@ target_include_directories(nx_eigen PRIVATE
   "${ERL_INCLUDE_DIR}"
   "${EIGEN_DIR}"
   "${FINE_INCLUDE}"
+)
+
+# Use precompiled headers for Eigen to speed up compilation
+# Eigen is header-only and template-heavy, so PCH helps significantly
+target_precompile_headers(nx_eigen PRIVATE
+  <Eigen/Core>
+  <Eigen/Dense>
+  <complex>
+  <cstring>
+  <vector>
 )
 
 # FFT library choice.
@@ -74,17 +96,8 @@ elseif(NX_EIGEN_FFT_LIB STREQUAL "fftw")
 
   if(FFTW3_FOUND AND FFTW3F_FOUND)
     target_include_directories(nx_eigen PRIVATE ${FFTW3_INCLUDE_DIRS})
-    # Use static libraries by directly linking .a files
-    pkg_get_variable(FFTW3_LIBDIR fftw3 libdir)
-    if(FFTW3_LIBDIR)
-      target_link_libraries(nx_eigen PRIVATE 
-        ${FFTW3_LIBDIR}/libfftw3.a 
-        ${FFTW3_LIBDIR}/libfftw3f.a)
-      message(STATUS "FFT support: FFTW3 static (via pkg-config)")
-    else()
-      target_link_libraries(nx_eigen PRIVATE ${FFTW3_LIBRARIES} ${FFTW3F_LIBRARIES})
-      message(STATUS "FFT support: FFTW3 (via pkg-config)")
-    endif()
+    target_link_libraries(nx_eigen PRIVATE ${FFTW3_LIBRARIES} ${FFTW3F_LIBRARIES})
+    message(STATUS "FFT support: FFTW3 dynamic (via pkg-config)")
   else()
     target_link_libraries(nx_eigen PRIVATE fftw3 fftw3f)
     message(STATUS "FFT support: FFTW3 (direct link)")

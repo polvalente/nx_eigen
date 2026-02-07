@@ -1,0 +1,46 @@
+# Dockerfile for musl-based compilation (Alpine Linux)
+# Used for x86_64-linux-musl and aarch64-linux-musl targets
+FROM hexpm/elixir:1.18.1-erlang-27.3.4.7-alpine-3.21.6
+
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+
+# Install build tools and FFTW (includes both double and single precision)
+RUN apk add --no-cache \
+    build-base \
+    gcc \
+    g++ \
+    make \
+    cmake \
+    ccache \
+    git \
+    curl \
+    wget \
+    pkgconfig \
+    fftw-dev \
+    fftw \
+    fftw-single-libs
+
+# Display platform information for debugging
+RUN echo "Building on ${BUILDPLATFORM} for ${TARGETPLATFORM}" && \
+    echo "Architecture: $(uname -m)" && \
+    gcc --version
+
+WORKDIR /work
+
+# Install Hex and Rebar
+RUN mix local.hex --force && \
+    mix local.rebar --force
+
+# Set environment for precompilation
+ENV MIX_ENV=prod
+ENV ELIXIR_MAKE_CACHE_DIR=/work/cache
+
+# Configure ccache for optimal performance
+ENV CCACHE_DIR=/work/.ccache
+ENV CCACHE_COMPRESS=1
+ENV CCACHE_COMPRESSLEVEL=6
+ENV CCACHE_MAXSIZE=1G
+RUN mkdir -p /work/.ccache
+
+CMD ["/bin/sh"]

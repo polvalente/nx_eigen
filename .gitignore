@@ -31,3 +31,5 @@ nx_eigen-*.tar
 # Precompilation cache and checksum
 /cache/
 checksum-*.exs
+/.ccache/
+/cmake-build/

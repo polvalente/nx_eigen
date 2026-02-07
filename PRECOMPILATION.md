@@ -13,21 +13,34 @@ NxEigen uses dynamic linking for FFTW. Users need to have FFTW installed on thei
 
 ### Quick Start with Docker (Local Development)
 
-For local cross-compilation, use Docker:
+For local multi-architecture builds, use Docker with BuildKit:
 
 ```bash
-# Build and precompile all Linux targets
+# Build precompiled binaries for all Linux targets
 ./scripts/precompile-docker.sh
 
-# Build and run tests
-./scripts/precompile-docker.sh test
+# Build a specific target only
+./scripts/precompile-docker.sh aarch64-linux-gnu
+
+# Test locally (after artifacts are built)
+mix test
 ```
 
 The Docker approach:
-- Provides a consistent build environment with all cross-compilation toolchains
-- Handles FFTW dependencies automatically
+
+- Runs **separate native containers** for each target architecture
+- Uses Docker BuildKit multi-platform support (linux/amd64, linux/arm64)
+- Each container builds natively for its architecture (no cross-compilation)
+- Handles FFTW dependencies automatically (Debian for glibc, Alpine for musl)
 - Works on macOS, Linux, and Windows (with WSL)
-- Cross-compiles for x86_64 and aarch64 Linux
+- Generates precompiled binaries for all supported Linux targets
+- **Testing**: Run `mix test` locally to test native builds
+
+**Requirements:**
+
+- Docker with BuildKit enabled
+- Multi-architecture support: `docker buildx create --use`
+- QEMU for non-native architectures (usually pre-installed)
 
 ### Native Build (macOS or Linux)
 
@@ -43,15 +56,24 @@ For native builds on your current platform:
 
 ## Supported Targets
 
-### Linux
-- `x86_64-linux-gnu` - Standard glibc-based x86_64 Linux
-- `aarch64-linux-gnu` - ARM64 Linux (glibc)
-- `aarch64-arduino-uno-q-linux-gnu` - **Arduino Uno Q optimized** (ARMv8-A + processor-specific flags)
-- `riscv64-linux-gnu` - RISC-V 64-bit Linux
-- `x86_64-linux-musl` - Alpine Linux (musl) x86_64
-- `aarch64-linux-musl` - Alpine Linux (musl) ARM64
+### Linux (Docker-based builds)
 
-### macOS
+The `scripts/precompile-docker.sh` builds these targets by default:
+
+- `x86_64-linux-gnu` - Standard glibc-based x86_64 Linux (Debian container)
+- `aarch64-linux-gnu` - ARM64 Linux (glibc, Debian container)
+- `aarch64-arduino-uno-q-linux-gnu` - **Arduino Uno Q optimized** (ARMv8-A + processor-specific flags)
+- `x86_64-linux-musl` - Alpine Linux (musl) x86_64 (Alpine container)
+- `aarch64-linux-musl` - Alpine Linux (musl) ARM64 (Alpine container)
+
+**Optional targets** (can be enabled in the script):
+
+- `riscv64-linux-gnu` - RISC-V 64-bit Linux (requires RISC-V emulation setup)
+
+### macOS (Native builds only)
+
+macOS builds are done on native runners in CI or locally:
+
 - `x86_64-apple-darwin` - Intel macOS
 - `aarch64-apple-darwin` - Apple Silicon (M1/M2/M3) macOS
 
