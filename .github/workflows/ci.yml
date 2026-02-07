@@ -8,7 +8,7 @@ on:
 
 jobs:
   test-linux:
-    name: Test on Linux (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    name: Test on Linux (x86_64)
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -32,7 +32,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
-            libfftw3-dev
+            libfftw3-dev \
+            libfftw3-3
+
+      - name: Verify FFTW installation
+        run: |
+          pkg-config --exists fftw3 fftw3f || (echo "FFTW not found!" && exit 1)
+          pkg-config --libs fftw3 fftw3f
+          ldconfig -p | grep fftw || true
 
       - name: Restore Eigen cache
         uses: actions/cache@v4
@@ -63,10 +70,12 @@ jobs:
         run: mix format --check-formatted
 
       - name: Run tests
+        env:
+          LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
         run: mix test
 
   test-linux-aarch64:
-    name: Test on Linux aarch64 (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    name: Test on Linux (aarch64)
     runs-on: ubuntu-22.04-arm
     strategy:
       matrix:
@@ -90,7 +99,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
-            libfftw3-dev
+            libfftw3-dev \
+            libfftw3-3
+
+      - name: Verify FFTW installation
+        run: |
+          pkg-config --exists fftw3 fftw3f || (echo "FFTW not found!" && exit 1)
+          pkg-config --libs fftw3 fftw3f
+          ldconfig -p | grep fftw || true
 
       - name: Restore Eigen cache
         uses: actions/cache@v4
@@ -121,6 +137,8 @@ jobs:
         run: mix format --check-formatted
 
       - name: Run tests
+        env:
+          LD_LIBRARY_PATH: /usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH
         run: mix test
 
   test-macos:
