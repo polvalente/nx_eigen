@@ -9,15 +9,20 @@ defmodule NxEigenTest do
     result = Nx.add(a, b)
 
     assert result.data.__struct__ == NxEigen.Backend
-    assert Nx.to_binary(result) == Nx.to_binary(Nx.tensor([[6.0, 8.0], [10.0, 12.0]], type: {:f, 32}))
+
+    assert Nx.to_binary(result) ==
+             Nx.to_binary(Nx.tensor([[6.0, 8.0], [10.0, 12.0]], type: {:f, 32}))
   end
 
   test "subtraction and multiplication with NxEigen backend" do
     a = NxEigen.tensor([[10.0, 20.0]], type: {:f, 32})
     b = NxEigen.tensor([[2.0, 4.0]], type: {:f, 32})
 
-    assert Nx.to_binary(Nx.subtract(a, b)) == Nx.to_binary(Nx.tensor([[8.0, 16.0]], type: {:f, 32}))
-    assert Nx.to_binary(Nx.multiply(a, b)) == Nx.to_binary(Nx.tensor([[20.0, 80.0]], type: {:f, 32}))
+    assert Nx.to_binary(Nx.subtract(a, b)) ==
+             Nx.to_binary(Nx.tensor([[8.0, 16.0]], type: {:f, 32}))
+
+    assert Nx.to_binary(Nx.multiply(a, b)) ==
+             Nx.to_binary(Nx.tensor([[20.0, 80.0]], type: {:f, 32}))
   end
 
   test "NxEigen.tensor helper" do
@@ -30,11 +35,15 @@ defmodule NxEigenTest do
 
     # exp
     res = Nx.exp(t)
-    assert Nx.to_binary(res) == Nx.to_binary(Nx.tensor([[:math.exp(1.0), :math.exp(2.0)]], type: {:f, 32}))
+
+    assert Nx.to_binary(res) ==
+             Nx.to_binary(Nx.tensor([[:math.exp(1.0), :math.exp(2.0)]], type: {:f, 32}))
 
     # sqrt
     res = Nx.sqrt(t)
-    assert Nx.to_binary(res) == Nx.to_binary(Nx.tensor([[:math.sqrt(1.0), :math.sqrt(2.0)]], type: {:f, 32}))
+
+    assert Nx.to_binary(res) ==
+             Nx.to_binary(Nx.tensor([[:math.sqrt(1.0), :math.sqrt(2.0)]], type: {:f, 32}))
   end
 
   test "inspect" do
@@ -81,8 +90,14 @@ defmodule NxEigenTest do
 
   test "all integer types" do
     types = [
-      {:u, 8}, {:u, 16}, {:u, 32}, {:u, 64},
-      {:s, 8}, {:s, 16}, {:s, 32}, {:s, 64}
+      {:u, 8},
+      {:u, 16},
+      {:u, 32},
+      {:u, 64},
+      {:s, 8},
+      {:s, 16},
+      {:s, 32},
+      {:s, 64}
     ]
 
     for type <- types do
@@ -229,7 +244,9 @@ defmodule NxEigenTest do
     slice_val = NxEigen.tensor([[10.0, 20.0]], type: {:f, 32})
 
     res = Nx.put_slice(t, [0, 1], slice_val)
-    assert Nx.to_binary(res) == Nx.to_binary(Nx.tensor([[1.0, 10.0, 20.0], [4.0, 5.0, 6.0]], type: {:f, 32}))
+
+    assert Nx.to_binary(res) ==
+             Nx.to_binary(Nx.tensor([[1.0, 10.0, 20.0], [4.0, 5.0, 6.0]], type: {:f, 32}))
   end
 
   test "select operation" do
@@ -238,7 +255,9 @@ defmodule NxEigenTest do
     on_false = NxEigen.tensor([[1.0, 2.0], [3.0, 4.0]], type: {:f, 32})
 
     res = Nx.select(pred, on_true, on_false)
-    assert Nx.to_binary(res) == Nx.to_binary(Nx.tensor([[10.0, 2.0], [3.0, 40.0]], type: {:f, 32}))
+
+    assert Nx.to_binary(res) ==
+             Nx.to_binary(Nx.tensor([[10.0, 2.0], [3.0, 40.0]], type: {:f, 32}))
   end
 
   # Linear Algebra

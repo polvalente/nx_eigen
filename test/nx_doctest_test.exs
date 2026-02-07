@@ -7,29 +7,28 @@ defmodule NxEigen.DocTest do
     :ok
   end
 
-
   @unsupported_types [
-      as_type: 2,
-      tensor: 2,
-      # bf16 type tests
-      real: 1,
-      imag: 1,
-      # f16 type tests
-      sigil_MAT: 2,
-      sigil_VEC: 2,
+    as_type: 2,
+    tensor: 2,
+    # bf16 type tests
+    real: 1,
+    imag: 1,
+    # f16 type tests
+    sigil_MAT: 2,
+    sigil_VEC: 2
   ]
 
   @rounding_error [
-      # These tests fail due to minor floating point precision differences
-      erf_inv: 1,
-      expm1: 1,
-      sigmoid: 1,
-      tanh: 1,
-      atanh: 1,
-      cosh: 1,
-      ceil: 1,
-      erfc: 1,
-    ]
+    # These tests fail due to minor floating point precision differences
+    erf_inv: 1,
+    expm1: 1,
+    sigmoid: 1,
+    tanh: 1,
+    atanh: 1,
+    cosh: 1,
+    ceil: 1,
+    erfc: 1
+  ]
 
   @unsupported_ops [
     reduce: 4,
@@ -38,18 +37,23 @@ defmodule NxEigen.DocTest do
     fft: 2,
     ifft: 2,
     fft2: 2,
-    ifft2: 2,
+    ifft2: 2
   ]
 
   @sub_byte_types [
-      # Sub-byte types (u2, etc.) not supported
-      bit_size: 1
+    # Sub-byte types (u2, etc.) not supported
+    bit_size: 1
   ]
 
   # Run Nx's own doctests with NxEigen backend
   # This ensures full compatibility with Nx's documented behavior
   doctest Nx,
-    except: @unsupported_types ++ @rounding_error ++ @sub_byte_types ++ @unsupported_ops ++ [
-      :moduledoc
-    ]
+    except:
+      @unsupported_types ++
+        @rounding_error ++
+        @sub_byte_types ++
+        @unsupported_ops ++
+        [
+          :moduledoc
+        ]
 end

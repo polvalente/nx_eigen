@@ -84,18 +84,31 @@ defmodule NxEigen.NIF do
   # Linear Algebra
   def dot(left, contract_axes1, batch_axes1, right, contract_axes2, batch_axes2),
     do: dot_nif(left, contract_axes1, batch_axes1, right, contract_axes2, batch_axes2)
+
   defp dot_nif(_left, _contract_axes1, _batch_axes1, _right, _contract_axes2, _batch_axes2),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def triangular_solve(a, b, lower, left_side, transform_a),
     do: triangular_solve_nif(a, b, lower, left_side, transform_a)
+
   defp triangular_solve_nif(_a, _b, _lower, _left_side, _transform_a),
     do: :erlang.nif_error(:nif_not_loaded)
 
   # Binary ops
   @binary_ops [
-    :add, :subtract, :multiply, :divide, :pow, :min, :max,
-    :equal, :not_equal, :greater, :less, :greater_equal, :less_equal
+    :add,
+    :subtract,
+    :multiply,
+    :divide,
+    :pow,
+    :min,
+    :max,
+    :equal,
+    :not_equal,
+    :greater,
+    :less,
+    :greater_equal,
+    :less_equal
   ]
   for op <- @binary_ops do
     def unquote(op)(l, r), do: unquote(:"#{op}_nif")(l, r)
@@ -121,10 +134,37 @@ defmodule NxEigen.NIF do
 
   # Unary ops
   @unary_ops [
-    :exp, :log, :sin, :cos, :tan, :asin, :acos, :atan,
-    :sinh, :cosh, :tanh, :asinh, :acosh, :atanh,
-    :abs, :sqrt, :ceil, :floor, :round, :sigmoid, :negate,
-    :cbrt, :expm1, :log1p, :rsqrt, :sign, :erf, :erfc, :conjugate, :real, :imag
+    :exp,
+    :log,
+    :sin,
+    :cos,
+    :tan,
+    :asin,
+    :acos,
+    :atan,
+    :sinh,
+    :cosh,
+    :tanh,
+    :asinh,
+    :acosh,
+    :atanh,
+    :abs,
+    :sqrt,
+    :ceil,
+    :floor,
+    :round,
+    :sigmoid,
+    :negate,
+    :cbrt,
+    :expm1,
+    :log1p,
+    :rsqrt,
+    :sign,
+    :erf,
+    :erfc,
+    :conjugate,
+    :real,
+    :imag
   ]
   for op <- @unary_ops do
     def unquote(op)(res), do: unquote(:"#{op}_nif")(res)
@@ -184,42 +224,52 @@ defmodule NxEigen.NIF do
   defp erf_inv_nif(_t), do: :erlang.nif_error(:nif_not_loaded)
 
   # Advanced indexing
-  def indexed_add(tensor, indices, updates, opts), do: indexed_add_nif(tensor, indices, updates, opts)
+  def indexed_add(tensor, indices, updates, opts),
+    do: indexed_add_nif(tensor, indices, updates, opts)
+
   defp indexed_add_nif(_tensor, _indices, _updates, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def indexed_put(tensor, indices, updates, opts), do: indexed_put_nif(tensor, indices, updates, opts)
+  def indexed_put(tensor, indices, updates, opts),
+    do: indexed_put_nif(tensor, indices, updates, opts)
+
   defp indexed_put_nif(_tensor, _indices, _updates, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
   # Window operations
   def window_sum(tensor, window_dims, opts) do
     window_sum_nif(tensor, Tuple.to_list(window_dims), opts)
   end
+
   defp window_sum_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
   def window_product(tensor, window_dims, opts) do
     window_product_nif(tensor, Tuple.to_list(window_dims), opts)
   end
+
   defp window_product_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
   def window_max(tensor, window_dims, opts) do
     window_max_nif(tensor, Tuple.to_list(window_dims), opts)
   end
+
   defp window_max_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
   def window_min(tensor, window_dims, opts) do
     window_min_nif(tensor, Tuple.to_list(window_dims), opts)
   end
+
   defp window_min_nif(_tensor, _window_dims, _opts), do: :erlang.nif_error(:nif_not_loaded)
 
   def window_scatter_max(tensor, source, init_val, window_dims, opts) do
     window_scatter_max_nif(tensor, source, init_val, Tuple.to_list(window_dims), opts)
   end
+
   defp window_scatter_max_nif(_tensor, _source, _init_val, _window_dims, _opts),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def window_scatter_min(tensor, source, init_val, window_dims, opts) do
     window_scatter_min_nif(tensor, source, init_val, Tuple.to_list(window_dims), opts)
   end
+
   defp window_scatter_min_nif(_tensor, _source, _init_val, _window_dims, _opts),
     do: :erlang.nif_error(:nif_not_loaded)
 

@@ -65,8 +65,66 @@ jobs:
       - name: Run tests
         run: mix test
 
+  test-linux-aarch64:
+    name: Test on Linux aarch64 (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    runs-on: ubuntu-22.04-arm
+    strategy:
+      matrix:
+        elixir: ["1.18.1"]
+        otp: ["27.2"]
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Erlang & Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libfftw3-dev
+
+      - name: Restore Eigen cache
+        uses: actions/cache@v4
+        with:
+          path: eigen-3.4.0
+          key: eigen-3.4.0
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-aarch64-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-aarch64-mix-${{ matrix.otp }}-${{ matrix.elixir }}-
+
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Run tests
+        run: mix test
+
   test-macos:
-    name: Test on macOS
+    name: Test on macOS (ARM64)
     runs-on: macos-14
     env:
       MIX_ENV: test
@@ -93,9 +151,53 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-arm64-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-
+            ${{ runner.os }}-arm64-mix-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Run tests
+        run: mix test
+
+  test-macos-x86:
+    name: Test on macOS (x86_64)
+    runs-on: macos-13
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Erlang & Elixir
+        run: |
+          brew install erlang elixir fftw
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Restore Eigen cache
+        uses: actions/cache@v4
+        with:
+          path: eigen-3.4.0
+          key: eigen-3.4.0
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-x86-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-x86-mix-
 
       - name: Install dependencies
         run: mix deps.get

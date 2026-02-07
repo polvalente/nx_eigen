@@ -73,10 +73,12 @@ defmodule NxEigen.Backend do
   @impl true
   def pad(out, tensor, pad_value, config) do
     # Convert pad_value tensor to a number or complex
-    val = case Nx.to_number(pad_value) do
-      %Complex{re: r, im: i} -> {r, i}
-      n when is_number(n) -> n
-    end
+    val =
+      case Nx.to_number(pad_value) do
+        %Complex{re: r, im: i} -> {r, i}
+        n when is_number(n) -> n
+      end
+
     # Convert config tuples to lists for NIF
     config_lists = Enum.map(config, &Tuple.to_list/1)
     state = NxEigen.NIF.pad(tensor.data.state, val, config_lists)
@@ -128,6 +130,7 @@ defmodule NxEigen.Backend do
       state = if opts[:keep_axes], do: NxEigen.NIF.reshape(state, out.shape), else: state
       # NIF returns int64, but we need to convert to the requested output type
       result = %{out | data: %__MODULE__{state: state}, type: {:s, 64}}
+
       if out.type != {:s, 64} do
         as_type(out, result)
       else
@@ -201,14 +204,16 @@ defmodule NxEigen.Backend do
     left = if left.type != out.type, do: Nx.as_type(left, out.type), else: left
     right = if right.type != out.type, do: Nx.as_type(right, out.type), else: right
 
-    state = NxEigen.NIF.dot(
-      left.data.state,
-      contract_axes1,
-      batch_axes1,
-      right.data.state,
-      contract_axes2,
-      batch_axes2
-    )
+    state =
+      NxEigen.NIF.dot(
+        left.data.state,
+        contract_axes1,
+        batch_axes1,
+        right.data.state,
+        contract_axes2,
+        batch_axes2
+      )
+
     %{out | data: %__MODULE__{state: state}}
   end
 
@@ -233,38 +238,46 @@ defmodule NxEigen.Backend do
     num_matrix_dims = if is_vector_b, do: 1, else: 2
 
     # Calculate batch dimensions from output shape
-    batch_dims = Tuple.to_list(out.shape) |> Enum.reverse() |> Enum.drop(num_matrix_dims) |> Enum.reverse()
+    batch_dims =
+      Tuple.to_list(out.shape) |> Enum.reverse() |> Enum.drop(num_matrix_dims) |> Enum.reverse()
+
     a_matrix_dims = Tuple.to_list(a.shape) |> Enum.reverse() |> Enum.take(2) |> Enum.reverse()
     target_a_shape = List.to_tuple(batch_dims ++ a_matrix_dims)
     a = maybe_broadcast(a, target_a_shape)
 
     lower = Keyword.get(opts, :lower, true)
     left_side = Keyword.get(opts, :left_side, true)
-    transform_a = case Keyword.get(opts, :transform_a, :none) do
-      :none -> 0
-      :transpose -> 1
-      :adjoint -> 2
-    end
+
+    transform_a =
+      case Keyword.get(opts, :transform_a, :none) do
+        :none -> 0
+        :transpose -> 1
+        :adjoint -> 2
+      end
 
     # Reshape B if it is a vector to make it compatible with C++ NIF (which expects matrix)
-    {b_state, out_needs_reshape} = if is_vector_b do
-      new_shape = if left_side do
-        Tuple.insert_at(out.shape, tuple_size(out.shape), 1)
+    {b_state, out_needs_reshape} =
+      if is_vector_b do
+        new_shape =
+          if left_side do
+            Tuple.insert_at(out.shape, tuple_size(out.shape), 1)
+          else
+            Tuple.insert_at(out.shape, tuple_size(out.shape) - 1, 1)
+          end
+
+        {NxEigen.NIF.reshape(b.data.state, new_shape), true}
       else
-        Tuple.insert_at(out.shape, tuple_size(out.shape) - 1, 1)
+        {b.data.state, false}
       end
-      {NxEigen.NIF.reshape(b.data.state, new_shape), true}
-    else
-      {b.data.state, false}
-    end
 
     state = NxEigen.NIF.triangular_solve(a.data.state, b_state, lower, left_side, transform_a)
 
-    state = if out_needs_reshape do
-      NxEigen.NIF.reshape(state, out.shape)
-    else
-      state
-    end
+    state =
+      if out_needs_reshape do
+        NxEigen.NIF.reshape(state, out.shape)
+      else
+        state
+      end
 
     %{out | data: %__MODULE__{state: state}}
   end
@@ -359,6 +372,7 @@ defmodule NxEigen.Backend do
   end
 
   defp ensure_backend(%Nx.Tensor{data: %__MODULE__{}} = tensor), do: tensor
+
   defp ensure_backend(tensor) do
     # Convert tensor from other backend to NxEigen backend
     binary = Nx.to_binary(tensor)
@@ -378,9 +392,26 @@ defmodule NxEigen.Backend do
 
   # Unary ops - math operations that require float types
   @float_math_ops [
-    :exp, :log, :sin, :cos, :tan, :asin, :acos, :atan,
-    :sinh, :cosh, :tanh, :asinh, :acosh, :atanh,
-    :sqrt, :cbrt, :log1p, :rsqrt, :erf, :erfc
+    :exp,
+    :log,
+    :sin,
+    :cos,
+    :tan,
+    :asin,
+    :acos,
+    :atan,
+    :sinh,
+    :cosh,
+    :tanh,
+    :asinh,
+    :acosh,
+    :atanh,
+    :sqrt,
+    :cbrt,
+    :log1p,
+    :rsqrt,
+    :erf,
+    :erfc
   ]
   for op <- @float_math_ops do
     @impl true
@@ -645,7 +676,10 @@ defmodule NxEigen.Backend do
     # Ensure tensor and updates have the same type as output
     tensor = maybe_upcast(tensor, out.type)
     updates = maybe_upcast(updates, out.type)
-    state = NxEigen.NIF.indexed_add(tensor.data.state, indices.data.state, updates.data.state, axes)
+
+    state =
+      NxEigen.NIF.indexed_add(tensor.data.state, indices.data.state, updates.data.state, axes)
+
     %{out | data: %__MODULE__{state: state}}
   end
 
@@ -658,7 +692,10 @@ defmodule NxEigen.Backend do
     # Ensure tensor and updates have the same type as output
     tensor = maybe_upcast(tensor, out.type)
     updates = maybe_upcast(updates, out.type)
-    state = NxEigen.NIF.indexed_put(tensor.data.state, indices.data.state, updates.data.state, axes)
+
+    state =
+      NxEigen.NIF.indexed_put(tensor.data.state, indices.data.state, updates.data.state, axes)
+
     %{out | data: %__MODULE__{state: state}}
   end
 
@@ -709,26 +746,32 @@ defmodule NxEigen.Backend do
   @impl true
   def window_scatter_max(out, tensor, source, init_value, window_dimensions, opts) do
     opts_list = convert_window_opts(opts)
-    state = NxEigen.NIF.window_scatter_max(
-      tensor.data.state,
-      source.data.state,
-      Nx.to_number(init_value),
-      window_dimensions,
-      opts_list
-    )
+
+    state =
+      NxEigen.NIF.window_scatter_max(
+        tensor.data.state,
+        source.data.state,
+        Nx.to_number(init_value),
+        window_dimensions,
+        opts_list
+      )
+
     %{out | data: %__MODULE__{state: state}}
   end
 
   @impl true
   def window_scatter_min(out, tensor, source, init_value, window_dimensions, opts) do
     opts_list = convert_window_opts(opts)
-    state = NxEigen.NIF.window_scatter_min(
-      tensor.data.state,
-      source.data.state,
-      Nx.to_number(init_value),
-      window_dimensions,
-      opts_list
-    )
+
+    state =
+      NxEigen.NIF.window_scatter_min(
+        tensor.data.state,
+        source.data.state,
+        Nx.to_number(init_value),
+        window_dimensions,
+        opts_list
+      )
+
     %{out | data: %__MODULE__{state: state}}
   end
 
@@ -766,6 +809,7 @@ defmodule NxEigen.Backend do
   # Helper functions
   defp clamp_indices(start_indices, shape, lengths) do
     shape_list = Tuple.to_list(shape)
+
     Enum.zip_with([shape_list, start_indices, lengths], fn [dim_size, idx, len] ->
       idx = to_scalar_int(idx)
       min(max(idx, 0), dim_size - len)
@@ -773,6 +817,7 @@ defmodule NxEigen.Backend do
   end
 
   defp to_scalar_int(n) when is_integer(n), do: n
+
   defp to_scalar_int(%Nx.Tensor{shape: {}} = t) do
     # Convert scalar tensor to integer
     t |> Nx.to_number() |> trunc()
