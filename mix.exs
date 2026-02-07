@@ -86,12 +86,12 @@ defmodule NxEigen.MixProject do
   defp cc_precompile do
     [
       compilers: %{
-        # Linux targets - will build only current architecture by default
         {:unix, :linux} => fn ->
           linux_targets_at_compile_time()
         end,
-        # macOS targets
-        {:unix, :darwin} => macos_targets()
+        {:unix, :darwin} => fn ->
+          macos_targets()
+        end
       }
     ]
   end
