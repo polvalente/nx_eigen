@@ -737,6 +737,8 @@ defmodule NxEigen.Backend do
   def fft(out, tensor, opts) do
     length = opts[:length]
     axis = opts[:axis] || -1
+    # Upcast to complex type before passing to NIF
+    tensor = Nx.as_type(tensor, Nx.Type.to_complex(tensor.type))
     state = NxEigen.NIF.fft(tensor.data.state, length, axis)
     %{out | data: %__MODULE__{state: state}}
   end
@@ -745,6 +747,8 @@ defmodule NxEigen.Backend do
   def ifft(out, tensor, opts) do
     length = opts[:length]
     axis = opts[:axis] || -1
+    # Upcast to complex type before passing to NIF
+    tensor = Nx.as_type(tensor, Nx.Type.to_complex(tensor.type))
     state = NxEigen.NIF.ifft(tensor.data.state, length, axis)
     %{out | data: %__MODULE__{state: state}}
   end

@@ -3008,7 +3008,8 @@ static void fft_along_axis_t(const std::complex<T> *in_buf,
   }
 }
 
-// Convert any EigenTensor variant to a flat vector<complex<T>>
+// Convert complex EigenTensor to a flat vector<complex<T>>
+// Assumes input is already complex (upcasted in Elixir)
 template <typename T>
 static std::vector<std::complex<T>>
 to_complex(const EigenTensor &t) {
@@ -3026,6 +3027,7 @@ to_complex(const EigenTensor &t) {
             out[i] = {static_cast<T>(arr(i).real()),
                       static_cast<T>(arr(i).imag())};
         } else {
+          // Should never reach here - input should be complex
           for (size_t i = 0; i < n; ++i)
             out[i] = {static_cast<T>(arr(i)), T(0)};
         }
@@ -3041,12 +3043,12 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
   auto geom = axis_geometry(tensor->shape, axis);
   int64_t fft_length = length;
 
-  // Check if input is double precision
+  // Input is guaranteed to be complex (upcasted in Elixir)
+  // Just check precision: c64 (complex<float>) or c128 (complex<double>)
   bool use_double = std::visit(
       [](const auto &arr) -> bool {
         using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
-        return std::is_same_v<Scalar, double> ||
-               std::is_same_v<Scalar, std::complex<double>>;
+        return std::is_same_v<Scalar, std::complex<double>>;
       },
       tensor->data);
 
@@ -3064,7 +3066,6 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
   result->shape = out_shape;
 
   if (use_double) {
-    // Use double precision throughout
     auto in_buf = to_complex<double>(*tensor);
     std::vector<std::complex<double>> out_buf(out_elems);
     fft_along_axis_t<double>(in_buf.data(), out_buf.data(), geom, fft_length,
@@ -3074,7 +3075,6 @@ fine::ResourcePtr<EigenTensor> fft_nif(ErlNifEnv *env,
     std::memcpy(res_arr.data(), out_buf.data(),
                 out_elems * sizeof(std::complex<double>));
   } else {
-    // Use float precision throughout (no conversion needed)
     auto in_buf = to_complex<float>(*tensor);
     std::vector<std::complex<float>> out_buf(out_elems);
     fft_along_axis_t<float>(in_buf.data(), out_buf.data(), geom, fft_length,
@@ -3096,12 +3096,12 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   auto geom = axis_geometry(tensor->shape, axis);
   int64_t fft_length = length;
 
-  // Check if input is double precision
+  // Input is guaranteed to be complex (upcasted in Elixir)
+  // Just check precision: c64 (complex<float>) or c128 (complex<double>)
   bool use_double = std::visit(
       [](const auto &arr) -> bool {
         using Scalar = typename std::decay_t<decltype(arr)>::Scalar;
-        return std::is_same_v<Scalar, double> ||
-               std::is_same_v<Scalar, std::complex<double>>;
+        return std::is_same_v<Scalar, std::complex<double>>;
       },
       tensor->data);
 
@@ -3118,7 +3118,6 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
   result->shape = out_shape;
 
   if (use_double) {
-    // Use double precision throughout
     auto in_buf = to_complex<double>(*tensor);
     std::vector<std::complex<double>> out_buf(out_elems);
     fft_along_axis_t<double>(in_buf.data(), out_buf.data(), geom, fft_length,
@@ -3132,7 +3131,6 @@ fine::ResourcePtr<EigenTensor> ifft_nif(ErlNifEnv *env,
     std::memcpy(res_arr.data(), out_buf.data(),
                 out_elems * sizeof(std::complex<double>));
   } else {
-    // Use float precision throughout (no conversion needed)
     auto in_buf = to_complex<float>(*tensor);
     std::vector<std::complex<float>> out_buf(out_elems);
     fft_along_axis_t<float>(in_buf.data(), out_buf.data(), geom, fft_length,
