@@ -27,3 +27,7 @@ nx_eigen-*.tar
 /priv/libnx_eigen.so
 /cmake
 /sysroot
+
+# Precompilation cache and checksum
+/cache/
+checksum-*.exs

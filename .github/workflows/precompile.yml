@@ -1,0 +1,194 @@
+name: Precompile NIFs
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-22.04
+    env:
+      MIX_ENV: prod
+      ELIXIR_MAKE_CACHE_DIR: ${{ github.workspace }}/cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Erlang & Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.1"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential automake autoconf pkg-config bc m4 unzip zip \
+            libfftw3-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
+
+      - name: Install FFTW static libraries for cross-compilation
+        run: |
+          # Download and build FFTW for aarch64
+          wget http://www.fftw.org/fftw-3.3.10.tar.gz
+          tar xzf fftw-3.3.10.tar.gz
+          cd fftw-3.3.10
+
+          # Build for aarch64 (standard)
+          ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
+            --enable-static --disable-shared CC=aarch64-linux-gnu-gcc
+          make -j$(nproc)
+          sudo make install
+
+          # Clean and build float version for aarch64
+          make clean
+          ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
+            --enable-static --disable-shared --enable-single CC=aarch64-linux-gnu-gcc
+          make -j$(nproc)
+          sudo make install
+
+          # Build optimized version for Arduino Uno Q (ARMv8-A with crypto+crc, tuned for Cortex-A53)
+          # Install to a separate prefix so we can use it for the specific target
+          make clean
+          ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-arduino-uno-q-linux-gnu \
+            --enable-static --disable-shared \
+            CC=aarch64-linux-gnu-gcc \
+            CFLAGS="-O3 -march=armv8-a+crypto+crc -mtune=cortex-a53 -mfix-cortex-a53-835769 -mfix-cortex-a53-843419"
+          make -j$(nproc)
+          sudo make install
+
+          # Clean and build float version for Arduino Uno Q
+          make clean
+          ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-arduino-uno-q-linux-gnu \
+            --enable-static --disable-shared --enable-single \
+            CC=aarch64-linux-gnu-gcc \
+            CFLAGS="-O3 -march=armv8-a+crypto+crc -mtune=cortex-a53 -mfix-cortex-a53-835769 -mfix-cortex-a53-843419"
+          make -j$(nproc)
+          sudo make install
+
+          cd ..
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Run tests (native build)
+        run: mix test
+
+      - name: Precompile NIFs
+        run: |
+          mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
+          mix elixir_make.precompile
+
+      - name: Upload precompiled artifacts
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: cache/*.tar.gz
+
+  macos:
+    name: macOS
+    runs-on: macos-14
+    env:
+      MIX_ENV: prod
+      ELIXIR_MAKE_CACHE_DIR: ${{ github.workspace }}/cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Erlang & Elixir
+        run: |
+          brew install erlang elixir fftw
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Run tests (native build)
+        run: mix test
+
+      - name: Precompile NIFs
+        run: |
+          mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
+          # macOS 14 is ARM64, so we'll build both architectures
+          mix elixir_make.precompile
+
+      - name: Upload precompiled artifacts
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: cache/*.tar.gz
+
+  # Optional: Add x86_64 macOS build on older runner
+  macos-x86:
+    name: macOS (x86_64)
+    runs-on: macos-13
+    env:
+      MIX_ENV: prod
+      ELIXIR_MAKE_CACHE_DIR: ${{ github.workspace }}/cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Erlang & Elixir
+        run: |
+          brew install erlang elixir fftw
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-x86-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-x86-mix-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Run tests (native build)
+        run: mix test
+
+      - name: Precompile NIFs
+        run: |
+          mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
+          mix elixir_make.precompile
+
+      - name: Upload precompiled artifacts
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: cache/*.tar.gz
