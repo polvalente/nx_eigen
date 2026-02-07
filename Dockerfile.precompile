@@ -1,0 +1,55 @@
+# Dockerfile for cross-compiling nx_eigen NIFs
+# This provides a complete environment with all cross-compilation toolchains
+ARG ERLANG_VERSION=27.2.1
+ARG ELIXIR_VERSION=1.18.1
+
+FROM hexpm/elixir:${ELIXIR_VERSION}-erlang-${ERLANG_VERSION}-debian-bookworm-20250101-slim
+
+# Install native and cross-compilation toolchains
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    pkg-config \
+    wget \
+    # Native FFTW
+    libfftw3-dev \
+    # Cross-compilation toolchains
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    gcc-riscv64-linux-gnu \
+    g++-riscv64-linux-gnu \
+    # For building FFTW
+    automake \
+    autoconf \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build FFTW for cross-compilation targets
+RUN cd /tmp && \
+    wget http://www.fftw.org/fftw-3.3.10.tar.gz && \
+    tar xzf fftw-3.3.10.tar.gz && \
+    # Build for aarch64
+    cd fftw-3.3.10 && \
+    ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
+      --enable-static --disable-shared CC=aarch64-linux-gnu-gcc && \
+    make -j$(nproc) && \
+    make install && \
+    make clean && \
+    ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
+      --enable-static --disable-shared --enable-single CC=aarch64-linux-gnu-gcc && \
+    make -j$(nproc) && \
+    make install && \
+    # Clean up
+    cd /tmp && rm -rf fftw-3.3.10*
+
+WORKDIR /work
+
+# Install Hex and Rebar
+RUN mix local.hex --force && \
+    mix local.rebar --force
+
+# Set environment for precompilation
+ENV MIX_ENV=prod
+ENV ELIXIR_MAKE_CACHE_DIR=/work/cache
+
+CMD ["/bin/bash"]

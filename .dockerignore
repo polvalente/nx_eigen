@@ -1,0 +1,34 @@
+# Git
+.git/
+.github/
+.gitignore
+
+# Build artifacts
+/_build/
+/deps/
+/priv/*.so
+/cache/
+/cmake-build/
+
+# Documentation
+/doc/
+*.md
+LICENSE
+
+# Test files
+/test/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.log
+erl_crash.dump

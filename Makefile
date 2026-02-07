@@ -48,31 +48,23 @@ else ifeq ($(NX_EIGEN_FFT_LIB),fftw)
   # Determine pkg-config command (handle cross-compilation)
   PKG_CONFIG ?= pkg-config
 
-  # Try pkg-config first (handles Homebrew installations properly)
+  # Try pkg-config first
   PKG_CONFIG_FFTW3 := $(shell $(PKG_CONFIG) --exists fftw3 2>/dev/null && echo yes)
   ifeq ($(PKG_CONFIG_FFTW3),yes)
     FFT_CFLAGS = $(shell $(PKG_CONFIG) --cflags fftw3 fftw3f)
-    # For static linking, use --libs-only-L and link .a files directly
-    FFTW_LIB_DIR := $(shell $(PKG_CONFIG) --variable=libdir fftw3)
-    FFT_LDFLAGS = $(FFTW_LIB_DIR)/libfftw3.a $(FFTW_LIB_DIR)/libfftw3f.a
+    FFT_LDFLAGS = $(shell $(PKG_CONFIG) --libs fftw3 fftw3f)
   else
-    # Fallback: try to find static libraries in standard locations
-    # This is useful for cross-compilation where pkg-config might not be configured
+    # Fallback for cross-compilation with sysroot
     ifneq ($(CROSSCOMPILE),)
-      # Check for TARGET environment variable for special targets like Arduino Uno Q
       ifdef TARGET
         SYSROOT ?= /usr/$(TARGET)
       else
-        # Cross-compilation mode - look for static libs in sysroot
         SYSROOT ?= /usr/$(CROSSCOMPILE:%-=%)
       endif
-      ifneq ($(wildcard $(SYSROOT)/lib/libfftw3.a),)
-        FFT_CFLAGS = -I$(SYSROOT)/include
-        FFT_LDFLAGS = $(SYSROOT)/lib/libfftw3.a $(SYSROOT)/lib/libfftw3f.a
-      else
-        FFT_LDFLAGS = -lfftw3 -lfftw3f
-      endif
+      FFT_CFLAGS = -I$(SYSROOT)/include
+      FFT_LDFLAGS = -L$(SYSROOT)/lib -lfftw3 -lfftw3f
     else
+      # Default: assume system libraries
       FFT_LDFLAGS = -lfftw3 -lfftw3f
     endif
   endif

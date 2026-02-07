@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   linux:
-    name: Linux
+    name: Linux (Docker cross-compile)
     runs-on: ubuntu-22.04
     env:
       MIX_ENV: prod
@@ -20,61 +20,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Erlang & Elixir
-        uses: erlef/setup-beam@v1
-        with:
-          otp-version: "27.2"
-          elixir-version: "1.18.1"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Install system dependencies
+      - name: Build cross-compilation Docker image
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential automake autoconf pkg-config bc m4 unzip zip \
-            libfftw3-dev \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
-
-      - name: Install FFTW static libraries for cross-compilation
-        run: |
-          # Download and build FFTW for aarch64
-          wget http://www.fftw.org/fftw-3.3.10.tar.gz
-          tar xzf fftw-3.3.10.tar.gz
-          cd fftw-3.3.10
-
-          # Build for aarch64 (standard)
-          ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
-            --enable-static --disable-shared CC=aarch64-linux-gnu-gcc
-          make -j$(nproc)
-          sudo make install
-
-          # Clean and build float version for aarch64
-          make clean
-          ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu \
-            --enable-static --disable-shared --enable-single CC=aarch64-linux-gnu-gcc
-          make -j$(nproc)
-          sudo make install
-
-          # Build optimized version for Arduino Uno Q (ARMv8-A with crypto+crc, tuned for Cortex-A53)
-          # Install to a separate prefix so we can use it for the specific target
-          make clean
-          ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-arduino-uno-q-linux-gnu \
-            --enable-static --disable-shared \
-            CC=aarch64-linux-gnu-gcc \
-            CFLAGS="-O3 -march=armv8-a+crypto+crc -mtune=cortex-a53 -mfix-cortex-a53-835769 -mfix-cortex-a53-843419"
-          make -j$(nproc)
-          sudo make install
-
-          # Clean and build float version for Arduino Uno Q
-          make clean
-          ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-arduino-uno-q-linux-gnu \
-            --enable-static --disable-shared --enable-single \
-            CC=aarch64-linux-gnu-gcc \
-            CFLAGS="-O3 -march=armv8-a+crypto+crc -mtune=cortex-a53 -mfix-cortex-a53-835769 -mfix-cortex-a53-843419"
-          make -j$(nproc)
-          sudo make install
-
-          cd ..
+          docker buildx build \
+            --file Dockerfile.precompile \
+            --tag nx_eigen_builder \
+            --load \
+            .
 
       - name: Restore Eigen cache
         uses: actions/cache@v4
@@ -82,28 +37,35 @@ jobs:
           path: eigen-3.4.0
           key: eigen-3.4.0
 
-      - name: Restore dependencies cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            deps
-            _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-
-
-      - name: Install dependencies
+      - name: Cross-compile all Linux targets in Docker
         run: |
-          mix local.hex --force
-          mix local.rebar --force
-          mix deps.get
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            -e MIX_ENV=prod \
+            -e ELIXIR_MAKE_CACHE_DIR=/work/cache \
+            nx_eigen_builder \
+            bash -c "
+              mix local.hex --force && \
+              mix local.rebar --force && \
+              mix deps.get && \
+              mkdir -p cache && \
+              mix elixir_make.precompile
+            "
 
-      - name: Run tests (native build)
-        run: mix test
-
-      - name: Precompile NIFs
+      - name: Run tests (native x86_64)
         run: |
-          mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
-          mix elixir_make.precompile
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            -e MIX_ENV=test \
+            nx_eigen_builder \
+            bash -c "
+              mix local.hex --force && \
+              mix local.rebar --force && \
+              mix deps.get && \
+              mix test
+            "
 
       - name: Upload precompiled artifacts
         uses: softprops/action-gh-release@v2
@@ -152,7 +114,7 @@ jobs:
       - name: Precompile NIFs
         run: |
           mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
-          # macOS 14 is ARM64, so we'll build both architectures
+          # macOS 14 is ARM64 - will build for arm64 only (native)
           mix elixir_make.precompile
 
       - name: Upload precompiled artifacts
@@ -161,7 +123,7 @@ jobs:
         with:
           files: cache/*.tar.gz
 
-  # Optional: Add x86_64 macOS build on older runner
+  # x86_64 macOS build on older runner
   macos-x86:
     name: macOS (x86_64)
     runs-on: macos-13
@@ -203,6 +165,7 @@ jobs:
       - name: Precompile NIFs
         run: |
           mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
+          # macOS 13 is x86_64 - will build for x86_64 only (native)
           mix elixir_make.precompile
 
       - name: Upload precompiled artifacts

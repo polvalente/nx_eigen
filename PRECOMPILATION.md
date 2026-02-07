@@ -4,7 +4,28 @@ This document describes how to build and publish precompiled binaries for NxEige
 
 ## Overview
 
-NxEigen uses static linking for FFTW to create self-contained precompiled binaries. This means users don't need to install FFTW separately when using precompiled binaries.
+NxEigen uses dynamic linking for FFTW. Users need to have FFTW installed on their system, either through:
+- Linux: `libfftw3` package (apt, yum, etc.)
+- macOS: Homebrew (`brew install fftw`)
+- Or use our precompiled binaries which work with system-installed FFTW
+
+## Quick Start with Docker
+
+The easiest way to cross-compile for Linux is using Docker:
+
+```bash
+# Build and precompile all Linux targets
+./scripts/precompile-docker.sh
+
+# Build and run tests
+./scripts/precompile-docker.sh test
+```
+
+The Docker approach:
+- Provides a consistent build environment with all cross-compilation toolchains
+- Handles FFTW dependencies automatically
+- Works on macOS, Linux, and Windows (with WSL)
+- Cross-compiles for x86_64 and aarch64 Linux
 
 ## Supported Targets
 

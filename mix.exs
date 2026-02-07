@@ -22,6 +22,9 @@ defmodule NxEigen.MixProject do
       make_precompiler_filename: "libnx_eigen",
       make_precompiler_priv_paths: ["libnx_eigen.so"],
       make_precompiler_nif_versions: [versions: ["2.15", "2.16", "2.17"]],
+      cc_precompiler: [
+        cleanup: "clean"
+      ],
       cc_precompile: cc_precompile(),
 
       # Package configuration
@@ -107,7 +110,41 @@ defmodule NxEigen.MixProject do
           }
         },
         # macOS targets
-        {:unix, :darwin} => %{
+        # Only build for current architecture to avoid cross-compilation issues with FFTW
+        {:unix, :darwin} => macos_targets()
+      }
+    ]
+  end
+
+  # On macOS, only build for the current architecture since FFTW is dynamically linked
+  # and Homebrew provides architecture-specific binaries
+  defp macos_targets do
+    case :erlang.system_info(:system_architecture) |> to_string() do
+      "aarch64" <> _ ->
+        %{
+          "aarch64-apple-darwin" => {
+            "clang",
+            "clang++",
+            "<%= cc %> -arch arm64",
+            "<%= cxx %> -arch arm64"
+          }
+        }
+
+      "x86_64" <> _ ->
+        %{
+          "x86_64-apple-darwin" => {
+            "clang",
+            "clang++",
+            "<%= cc %> -arch x86_64",
+            "<%= cxx %> -arch x86_64"
+          }
+        }
+
+      arch ->
+        # Fallback: build both if we can't detect
+        IO.warn("Unknown macOS architecture: #{arch}, building for both x86_64 and arm64")
+
+        %{
           "x86_64-apple-darwin" => {
             "clang",
             "clang++",
@@ -121,7 +158,6 @@ defmodule NxEigen.MixProject do
             "<%= cxx %> -arch arm64"
           }
         }
-      }
-    ]
+    end
   end
 end
