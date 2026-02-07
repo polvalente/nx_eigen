@@ -34,6 +34,12 @@ jobs:
             build-essential \
             libfftw3-dev
 
+      - name: Restore Eigen cache
+        uses: actions/cache@v4
+        with:
+          path: eigen-3.4.0
+          key: eigen-3.4.0
+
       - name: Restore dependencies cache
         uses: actions/cache@v4
         with:
@@ -74,6 +80,12 @@ jobs:
           brew install erlang elixir fftw
           mix local.hex --force
           mix local.rebar --force
+
+      - name: Restore Eigen cache
+        uses: actions/cache@v4
+        with:
+          path: eigen-3.4.0
+          key: eigen-3.4.0
 
       - name: Restore dependencies cache
         uses: actions/cache@v4
