@@ -152,26 +152,6 @@ defmodule NxEigen.MixProject do
               }
             }
 
-          "x86_64-linux-musl" ->
-            %{
-              "x86_64-linux-musl" => {
-                "zig cc -target x86_64-linux-musl",
-                "zig c++ -target x86_64-linux-musl",
-                "<%= cc %>",
-                "<%= cxx %>"
-              }
-            }
-
-          "aarch64-linux-musl" ->
-            %{
-              "aarch64-linux-musl" => {
-                "zig cc -target aarch64-linux-musl",
-                "zig c++ -target aarch64-linux-musl",
-                "<%= cc %>",
-                "<%= cxx %>"
-              }
-            }
-
           _ ->
             IO.warn("Unknown PRECOMPILE_TARGET: #{target}, falling back to native")
             native_linux_target()

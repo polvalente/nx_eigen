@@ -15,8 +15,6 @@ declare -A TARGETS=(
     ["x86_64-linux-gnu"]="linux/amd64"
     ["aarch64-linux-gnu"]="linux/arm64"
     ["aarch64-arduino-uno-q-linux-gnu"]="linux/arm64"
-    ["x86_64-linux-musl"]="linux/amd64"
-    ["aarch64-linux-musl"]="linux/arm64"
 )
 
 # Optional targets that may not be available on all systems
@@ -73,15 +71,8 @@ build_docker_image_for_platform() {
 
     cd "${PROJECT_ROOT}"
 
-    # Use Alpine-based Dockerfile for musl targets
-    local dockerfile="Dockerfile.precompile"
-    if [[ "$target" == *"-musl" ]]; then
-        dockerfile="Dockerfile.precompile.alpine"
-        log_info "Using Alpine Linux for musl target"
-    fi
-
     if ! docker buildx build \
-        --file "${dockerfile}" \
+        --file "Dockerfile.precompile" \
         --platform "${platform}" \
         --tag "${tag}" \
         --build-arg TARGETPLATFORM="${platform}" \
@@ -110,12 +101,6 @@ run_precompile_for_target() {
         extra_env="-e TARGET_OS=arduino-uno-q-linux -e TARGET_ARCH=aarch64 -e TARGET_ABI=gnu"
     fi
 
-    # Use appropriate shell based on target (Alpine uses /bin/sh)
-    local shell_cmd="bash"
-    if [[ "$target" == *"-musl" ]]; then
-        shell_cmd="sh"
-    fi
-
     if ! docker run --rm \
         -v "${PROJECT_ROOT}:/work" \
         -w /work \
@@ -124,7 +109,7 @@ run_precompile_for_target() {
         -e PRECOMPILE_TARGET="${target}" \
         ${extra_env} \
         "${docker_image}" \
-        ${shell_cmd} -c "
+        bash -c "
           set -e
           echo 'Installing Hex and Rebar...'
           mix local.hex --force

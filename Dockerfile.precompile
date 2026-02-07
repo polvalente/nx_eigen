@@ -1,6 +1,6 @@
 # Dockerfile for native compilation of nx_eigen NIFs
 # This builds natively for each target platform using Docker multi-arch support
-FROM hexpm/elixir:1.18.1-erlang-27.3-debian-bullseye-20260112-slim
+FROM hexpm/elixir:1.18-otp-27-debian
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM

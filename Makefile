@@ -129,7 +129,7 @@ clean:
 	rm -rf priv $(LIB_NAME) $(CMAKE_BUILD_DIR) eigen-$(EIGEN_VERSION)*
 
 # Precompilation targets
-precompile-docker:
+precompile:
 	@bash scripts/precompile-docker.sh
 
 # Test precompiled binaries
@@ -143,5 +143,5 @@ test-precompiled-target:
 	fi
 	@bash scripts/test-precompiled.sh $(TARGET)
 
-.PHONY: all clean check-deps precompile-docker test-precompiled test-precompiled-target
+.PHONY: all clean check-deps precompile test-precompiled test-precompiled-target
 

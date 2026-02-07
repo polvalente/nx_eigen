@@ -14,18 +14,8 @@ declare -A TARGETS=(
     ["x86_64-linux-gnu"]="linux/amd64"
     ["aarch64-linux-gnu"]="linux/arm64"
     ["aarch64-arduino-uno-q-linux-gnu"]="linux/arm64"
-    ["x86_64-linux-musl"]="linux/amd64"
-    ["aarch64-linux-musl"]="linux/arm64"
 )
 
-# Base images for different target types
-declare -A BASE_IMAGES=(
-    ["x86_64-linux-gnu"]="hexpm/elixir:1.18.1-erlang-27.3-debian-bullseye-20260112-slim"
-    ["aarch64-linux-gnu"]="hexpm/elixir:1.18.1-erlang-27.3-debian-bullseye-20260112-slim"
-    ["aarch64-arduino-uno-q-linux-gnu"]="hexpm/elixir:1.18.1-erlang-27.3-debian-bullseye-20260112-slim"
-    ["x86_64-linux-musl"]="hexpm/elixir:1.18.1-erlang-27.3-alpine-3.21.0"
-    ["aarch64-linux-musl"]="hexpm/elixir:1.18.1-erlang-27.3-alpine-3.21.0"
-)
 
 # Colors for output
 RED='\033[0;31m'
@@ -89,7 +79,6 @@ find_precompiled_binary() {
 build_test_image() {
     local platform="$1"
     local target="$2"
-    local base_image="${BASE_IMAGES[$target]}"
     local tag="nx_eigen_test:${target}"
 
     log_step "Building test image for ${target} on ${platform}"
@@ -100,7 +89,6 @@ build_test_image() {
         --file Dockerfile.test \
         --platform "${platform}" \
         --tag "${tag}" \
-        --build-arg BASE_IMAGE="${base_image}" \
         --build-arg TARGETPLATFORM="${platform}" \
         --build-arg PRECOMPILE_TARGET="${target}" \
         --load \

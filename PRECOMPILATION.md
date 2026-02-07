@@ -31,7 +31,7 @@ The Docker approach:
 - Runs **separate native containers** for each target architecture
 - Uses Docker BuildKit multi-platform support (linux/amd64, linux/arm64)
 - Each container builds natively for its architecture (no cross-compilation)
-- Handles FFTW dependencies automatically (Debian for glibc, Alpine for musl)
+- Handles FFTW dependencies automatically (Debian glibc)
 - Works on macOS, Linux, and Windows (with WSL)
 - Generates precompiled binaries for all supported Linux targets
 - **Testing**: Run `mix test` locally to test native builds
@@ -63,8 +63,6 @@ The `scripts/precompile-docker.sh` builds these targets by default:
 - `x86_64-linux-gnu` - Standard glibc-based x86_64 Linux (Debian container)
 - `aarch64-linux-gnu` - ARM64 Linux (glibc, Debian container)
 - `aarch64-arduino-uno-q-linux-gnu` - **Arduino Uno Q optimized** (ARMv8-A + processor-specific flags)
-- `x86_64-linux-musl` - Alpine Linux (musl) x86_64 (Alpine container)
-- `aarch64-linux-musl` - Alpine Linux (musl) ARM64 (Alpine container)
 
 **Optional targets** (can be enabled in the script):
 
@@ -211,9 +209,6 @@ Install cross-compilers:
 sudo apt-get install -y \
   gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
   gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
-
-# For musl targets, install zig
-# Download from https://ziglang.org/download/
 ```
 
 FFTW must be built statically for each target. The GitHub Actions workflow handles this automatically.

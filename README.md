@@ -254,7 +254,7 @@ end
 
 **Precompiled binaries are automatically downloaded** for supported platforms:
 
-- Linux: x86_64, aarch64, riscv64 (glibc and musl)
+- Linux: x86_64, aarch64, riscv64 (glibc)
 - macOS: x86_64 (Intel), aarch64 (Apple Silicon)
 
 No need to install FFTW separately - it's statically linked into the precompiled binaries.
@@ -265,7 +265,6 @@ No need to install FFTW separately - it's statically linked into the precompiled
 |----------|--------------|-------|
 | Linux (glibc) | x86_64, aarch64, riscv64 | Ubuntu, Debian, Fedora, etc. |
 | **Arduino Uno Q** | **aarch64** | **Optimized with `-march=armv8-a+crypto+crc`** |
-| Linux (musl) | x86_64, aarch64 | Alpine Linux |
 | macOS | x86_64, aarch64 | Intel and Apple Silicon |
 
 The Arduino Uno Q target is specifically optimized for the Qualcomm QRB2210 processor (ARM Cortex-A53) with cryptographic and CRC extensions enabled for maximum performance.

@@ -9,6 +9,8 @@
 /priv/*.so
 /cache/
 /cmake-build/
+*.beam
+.elixir_ls/
 
 # Keep ccache for faster rebuilds
 # /.ccache/
