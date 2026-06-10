@@ -28,7 +28,11 @@ defmodule NxEigen.DocTest do
     atanh: 1,
     cosh: 1,
     ceil: 1,
-    erfc: 1
+    erfc: 1,
+    # Last-ulp f64 differences against the doctest corpus added in Nx 0.12
+    exp: 1,
+    log1p: 1,
+    rsqrt: 1
   ]
 
   @unsupported_ops [

@@ -44,6 +44,18 @@ defmodule NxEigen.Backend do
     []
   end
 
+  # Nx >= 0.12 routes a family of ops (cumulative ops, the LinAlg
+  # decompositions, take/take_along_axis, top_k, ...) through the block
+  # mechanism. Every call site hands the backend a default implementation
+  # that decomposes the block into primitive ops; running it keeps all of
+  # those ops working on this backend's own tensors. Native Eigen
+  # fast-paths for specific blocks (e.g. Cholesky via Eigen's LLT) can be
+  # added as clauses above this fallback later.
+  @impl true
+  def block(block, _output, args, default_impl) do
+    apply(default_impl, [block | args])
+  end
+
   @impl true
   def from_binary(tensor, binary, _backend_opts) do
     state = NxEigen.NIF.from_binary(binary, tensor.type, tensor.shape)
