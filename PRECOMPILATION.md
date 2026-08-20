@@ -98,6 +98,54 @@ The `scripts/precompile-docker.sh` builds these targets by default:
 
 - `riscv64-linux-gnu` - RISC-V 64-bit Linux (requires RISC-V emulation setup)
 
+### Nerves (cross-compiled)
+
+- `armv7-cortex-a7-linux-gnueabihf` - Nerves systems on a Cortex-A7, such as
+  `nerves_system_trellis` (Allwinner T113, the Nerves Starter Kit board)
+
+This target is cross-compiled with the same Nerves toolchain the system is built
+with (`armv7_nerves_linux_gnueabihf`), so the glibc and libstdc++ it links
+against match those in the system.
+
+Nerves systems do not ship FFTW, so `mix.exs` builds this target with
+`NX_EIGEN_FFT_LIB=eigen` — Eigen's own FFT module, which needs no external
+library. See [FFT backends](#fft-backends) for the trade-off.
+
+To build it locally, put the toolchain on your `PATH` and run:
+
+```bash
+curl -fsSL https://github.com/nerves-project/toolchains/releases/download/v15.3.0/nerves_toolchain_armv7_nerves_linux_gnueabihf-linux_x86_64-15.3.0-9917D70.tar.xz | tar -xJ
+export PATH="$(pwd)/nerves_toolchain_armv7_nerves_linux_gnueabihf/bin:${PATH}"
+
+MIX_ENV=prod \
+  PRECOMPILE_TARGET=armv7-cortex-a7-linux-gnueabihf \
+  ELIXIR_MAKE_CACHE_DIR="$(pwd)/cache" \
+  mix elixir_make.precompile
+```
+
+The `scripts/precompile-docker.sh` flow does not cover this target: it builds
+natively in a container per architecture, while this one is cross-compiled.
+
+#### How Nerves devices resolve a target
+
+Nerves exports `TARGET_ARCH=arm`, `TARGET_OS=linux` and `TARGET_ABI=gnueabihf`
+for *every* 32-bit ARM board, so `cc_precompiler` resolves ARMv6 and ARMv7
+devices to the same `arm-linux-gnueabihf` triplet. `NxEigen.Precompiler` (in
+`precompiler.exs`) refines that triplet using `TARGET_CPU`:
+
+| `TARGET_CPU`   | Target                            | Published |
+| -------------- | --------------------------------- | --------- |
+| `cortex_a7`    | `armv7-cortex-a7-linux-gnueabihf` | Yes       |
+| `arm1176*`     | `armv6-linux-gnueabihf`           | No        |
+| anything else  | `arm-linux-gnueabihf`             | No        |
+
+Unpublished targets fall back to `:ignore`, so boards we have not built for get
+no NIF rather than a binary that faults with an illegal instruction.
+
+When adding a target, add it to **both** the compiler map in `mix.exs` and
+`@published_targets` in `precompiler.exs` - the latter is what a consumer uses
+to work out the download URL.
+
 ### macOS (Native builds only)
 
 macOS builds are done on native runners in CI or locally:
@@ -181,13 +229,13 @@ This will create `.tar.gz` files in the `cache` directory.
 After GitHub Actions has uploaded all precompiled binaries to the release:
 
 ```bash
-# Download all artifacts and generate checksum file
-# PRECOMPILE_TARGET=all is required to include all OS/arch combinations,
-# not just the native architecture of the machine running the command.
-MIX_ENV=prod PRECOMPILE_TARGET=all mix elixir_make.checksum --all --print
+# Download all artifacts and generate checksum file.
+# `NxEigen.Precompiler` reports every published target regardless of the host,
+# so no PRECOMPILE_TARGET is needed here.
+MIX_ENV=prod mix elixir_make.checksum --all --print
 
 # Or if some targets are not yet available:
-MIX_ENV=prod PRECOMPILE_TARGET=all mix elixir_make.checksum --all --print --ignore-unavailable
+MIX_ENV=prod mix elixir_make.checksum --all --print --ignore-unavailable
 ```
 
 This creates `checksum.exs` which **must be committed** and included in the package.
@@ -261,7 +309,7 @@ mix elixir_make.precompile
 1. ✅ Update version in `mix.exs`
 2. ✅ Commit and tag: `git tag v0.1.0 && git push origin v0.1.0`
 3. ✅ Wait for GitHub Actions to complete
-4. ✅ Generate checksum: `MIX_ENV=prod PRECOMPILE_TARGET=all mix elixir_make.checksum --all --print` (wait for all CI jobs to finish first)
+4. ✅ Generate checksum: `MIX_ENV=prod mix elixir_make.checksum --all --print` (wait for all CI jobs to finish first)
 5. ✅ Commit checksum file: `git add checksum.exs && git commit -m "Add checksums for vX.Y.Z"`
 6. ✅ Publish to Hex: `mix hex.publish`
 

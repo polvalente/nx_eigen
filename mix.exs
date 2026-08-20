@@ -1,3 +1,5 @@
+Code.require_file("precompiler.exs", __DIR__)
+
 defmodule NxEigen.MixProject do
   use Mix.Project
 
@@ -6,6 +8,14 @@ defmodule NxEigen.MixProject do
   @cc_template "<%= cc %>"
   @cxx_template "<%= cxx %>"
   @uno_q_linux_flags "-march=armv8-a+crypto+crc -mtune=cortex-a53 -mfix-cortex-a53-835769 -mfix-cortex-a53-843419"
+
+  # Mirrors TARGET_GCC_FLAGS from the Nerves systems built on a Cortex-A7 (such
+  # as nerves_system_trellis), minus -fPIE/-pie, which conflict with building a
+  # shared library. Symbols are stripped because Nerves strips target binaries
+  # by default and the debug info is a third of the size of the NIF.
+  @cortex_a7_flags "-mabi=aapcs-linux -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -marm -fstack-protector-strong -s -Wl,-z,now -Wl,-z,relro"
+  @cortex_a7_target "armv7-cortex-a7-linux-gnueabihf"
+  @nerves_armv7_prefix "armv7-nerves-linux-gnueabihf-"
 
   def project do
     [
@@ -23,7 +33,7 @@ defmodule NxEigen.MixProject do
       # Force source build in dev/test so only_listed_targets: true doesn't cause
       # cc_precompiler to return :ignore and silently skip NIF compilation.
       make_force_build: Mix.env() != :prod,
-      make_precompiler: {:nif, CCPrecompiler},
+      make_precompiler: {:nif, NxEigen.Precompiler},
       make_precompiler_url: "#{@source_url}/releases/download/v#{@version}/@{artefact_filename}",
       make_precompiler_filename: "libnx_eigen",
       make_precompiler_priv_paths: ["libnx_eigen.so"],
@@ -62,8 +72,19 @@ defmodule NxEigen.MixProject do
       end
 
     %{"FINE_INCLUDE" => fine_include}
+    |> Map.merge(target_fft_lib())
     |> forward_env("NX_EIGEN_FFT_LIB")
     |> forward_env("NX_EIGEN_FFT_SO")
+  end
+
+  # Nerves systems don't ship FFTW, so the Cortex-A7 target builds against
+  # Eigen's own FFT module instead. `forward_env` runs after this, so an
+  # explicit NX_EIGEN_FFT_LIB still wins.
+  defp target_fft_lib do
+    case System.get_env("PRECOMPILE_TARGET") do
+      @cortex_a7_target -> %{"NX_EIGEN_FFT_LIB" => "eigen"}
+      _ -> %{}
+    end
   end
 
   defp forward_env(env, var) do
@@ -100,6 +121,7 @@ defmodule NxEigen.MixProject do
         "CMakeLists.txt",
         "checksum.exs",
         "mix.exs",
+        "precompiler.exs",
         "README.md",
         "LICENSE"
       ],
@@ -176,6 +198,9 @@ defmodule NxEigen.MixProject do
           "aarch64-linux-gnu" ->
             linux_target("aarch64-linux-gnu")
 
+          @cortex_a7_target ->
+            cortex_a7_target()
+
           "riscv64-linux-gnu" ->
             linux_target("riscv64-linux-gnu")
 
@@ -196,6 +221,21 @@ defmodule NxEigen.MixProject do
         "#{@cxx_template} #{@uno_q_linux_flags}"
       )
     )
+    |> Map.merge(cortex_a7_target())
+  end
+
+  # Built with the Nerves toolchain so that the glibc and libstdc++ the NIF links
+  # against match the ones in the Nerves system.
+  defp cortex_a7_target do
+    %{
+      @cortex_a7_target =>
+        toolchain(
+          "#{@nerves_armv7_prefix}gcc",
+          "#{@nerves_armv7_prefix}g++",
+          "#{@cc_template} #{@cortex_a7_flags}",
+          "#{@cxx_template} #{@cortex_a7_flags}"
+        )
+    }
   end
 
   # Native Linux target based on current architecture

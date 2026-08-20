@@ -268,6 +268,136 @@ jobs:
         with:
           files: cache/*.tar.gz
 
+  linux-armv7-nerves:
+    name: Linux (armv7, Nerves Cortex-A7)
+    runs-on: ubuntu-22.04
+    env:
+      MIX_ENV: prod
+      ELIXIR_MAKE_CACHE_DIR: ${{ github.workspace }}/cache
+      PRECOMPILE_TARGET: armv7-cortex-a7-linux-gnueabihf
+      TARGET_ARCH: arm
+      TARGET_CPU: cortex_a7
+      TARGET_OS: linux
+      TARGET_ABI: gnueabihf
+      # FFT comes from Eigen's own module for this target (mix.exs sets it) since
+      # Nerves systems do not ship FFTW.
+      # Matches BR2_TOOLCHAIN_EXTERNAL_URL in the Nerves systems this target
+      # serves; building against a newer glibc than the system ships would fail
+      # to load on the device.
+      NERVES_TOOLCHAIN_VERSION: "15.3.0"
+      NERVES_TOOLCHAIN_BUILD: "9917D70"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Erlang & Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.1"
+
+      - name: Print OTP / NIF versions
+        run: |
+          erl -noshell -eval 'io:format("OTP=~s NIF=~p~n", [erlang:system_info(otp_release), erlang:system_info(nif_version)]), halt().'
+          elixir -e 'IO.puts("Elixir=" <> System.version())'
+
+      - name: Restore Nerves toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.nerves/toolchains
+          key: nerves-toolchain-armv7-${{ env.NERVES_TOOLCHAIN_VERSION }}
+
+      - name: Install Nerves toolchain
+        run: |
+          TOOLCHAIN="nerves_toolchain_armv7_nerves_linux_gnueabihf-linux_x86_64-${NERVES_TOOLCHAIN_VERSION}"
+          DIR="${HOME}/.nerves/toolchains/${TOOLCHAIN}"
+
+          if [ ! -d "${DIR}" ]; then
+            mkdir -p "${DIR}"
+            curl -fsSL \
+              "https://github.com/nerves-project/toolchains/releases/download/v${NERVES_TOOLCHAIN_VERSION}/${TOOLCHAIN}-${NERVES_TOOLCHAIN_BUILD}.tar.xz" \
+              | tar -xJ -C "${DIR}" --strip-components=1
+          fi
+
+          echo "${DIR}/bin" >> "${GITHUB_PATH}"
+
+      - name: Print toolchain version
+        run: armv7-nerves-linux-gnueabihf-g++ --version
+
+      - name: Restore Eigen cache
+        uses: actions/cache@v4
+        with:
+          path: eigen-3.4.0
+          key: eigen-3.4.0
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-armv7-nerves-otp-27.2-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-armv7-nerves-otp-27.2-mix-
+
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Precompile NIFs
+        run: |
+          mkdir -p "${ELIXIR_MAKE_CACHE_DIR}"
+          mix elixir_make.precompile 2>&1 | tee build.log
+
+          # The artifact is stripped, so which FFT backend went in can only be
+          # checked here, in the compiler invocation.
+          if ! grep -q "nx_eigen_fft_eigen.cpp" build.log; then
+            echo "ERROR: expected the Eigen FFT backend to be compiled in"
+            exit 1
+          fi
+
+      # GitHub does not offer armv7 runners, so the artifact is inspected rather
+      # than executed. It is validated on device.
+      - name: Inspect precompiled artifact
+        run: |
+          TARBALL=$(ls ${ELIXIR_MAKE_CACHE_DIR}/*${PRECOMPILE_TARGET}*.tar.gz | head -n 1)
+          echo "Inspecting precompiled artifact: ${TARBALL}"
+          TMP_DIR=$(mktemp -d)
+          tar -xzf "${TARBALL}" -C "${TMP_DIR}"
+          SO_FILE=$(find "${TMP_DIR}" -name "libnx_eigen.so" -type f | head -n 1)
+          if [ -z "${SO_FILE}" ]; then
+            echo "ERROR: libnx_eigen.so not found in tarball"
+            exit 1
+          fi
+
+          readelf -hA "${SO_FILE}"
+          readelf -d "${SO_FILE}" | grep NEEDED
+
+          if ! readelf -h "${SO_FILE}" | grep -q "Machine:.*ARM"; then
+            echo "ERROR: artifact is not an ARM binary"
+            exit 1
+          fi
+
+          if ! readelf -A "${SO_FILE}" | grep -q "Tag_ABI_VFP_args: VFP registers"; then
+            echo "ERROR: artifact is not hard-float"
+            exit 1
+          fi
+
+          if readelf -d "${SO_FILE}" | grep -q fftw; then
+            echo "ERROR: artifact links FFTW, which Nerves systems do not ship"
+            exit 1
+          fi
+
+          rm -rf "${TMP_DIR}"
+
+      - name: Upload precompiled artifacts
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch'
+        with:
+          files: cache/*.tar.gz
+
   macos:
     name: macOS
     runs-on: macos-14
