@@ -1,4 +1,10 @@
-ERL_INCLUDE_DIR ?= $(shell erl -noshell -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')
+# ERTS_INCLUDE_DIR is exported by cross-compilation environments such as Nerves
+# and points at the target's erts includes rather than the build host's.
+ifdef ERTS_INCLUDE_DIR
+  ERL_INCLUDE_DIR ?= $(ERTS_INCLUDE_DIR)
+else
+  ERL_INCLUDE_DIR ?= $(shell erl -noshell -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')
+endif
 
 # Cross-compilation configuration
 # - Set CROSSCOMPILE to a toolchain prefix (e.g. aarch64-linux-gnu-)
@@ -31,8 +37,11 @@ FINE_INCLUDE ?= $(error FINE_INCLUDE is not set. Use mix compile instead of bare
 NX_EIGEN_FFT_LIB ?= fftw
 NX_EIGEN_FFT_SO  ?=
 
-CFLAGS = -fPIC -I$(ERL_INCLUDE_DIR) -I$(EIGEN_INCLUDE) -I$(FINE_INCLUDE) -Ic_src -O3 -std=c++17
-LDFLAGS = -shared -fvisibility=hidden
+# Inherit CXXFLAGS/LDFLAGS from the environment: cross-compilation environments
+# such as Nerves use them to pass --sysroot and processor-specific flags, and a
+# plain `=` assignment would discard them.
+CFLAGS := $(CXXFLAGS) -fPIC -I$(ERL_INCLUDE_DIR) -I$(EIGEN_INCLUDE) -I$(FINE_INCLUDE) -Ic_src -O3 -std=c++17
+LDFLAGS := $(LDFLAGS) -shared -fvisibility=hidden
 
 # Resolve FFT sources and link flags
 FFT_SRCS =
