@@ -28,6 +28,7 @@ FINE_INCLUDE ?= $(error FINE_INCLUDE is not set. Use mix compile instead of bare
 #
 # NX_EIGEN_FFT_LIB selects which implementation is compiled in:
 #   fftw  - Use FFTW3 (default for native builds)
+#   eigen - Use Eigen's own FFT module; no external library, slower than FFTW
 #   none  - Disable FFT support (stubs that return errors)
 #
 # NX_EIGEN_FFT_SO overrides NX_EIGEN_FFT_LIB entirely: set it to the
@@ -82,10 +83,12 @@ else ifeq ($(NX_EIGEN_FFT_LIB),fftw)
       FFT_LDFLAGS = -lfftw3 -lfftw3f -Wl,-rpath,/usr/lib -Wl,-rpath,/usr/local/lib
     endif
   endif
+else ifeq ($(NX_EIGEN_FFT_LIB),eigen)
+  FFT_SRCS = c_src/nx_eigen_fft_eigen.cpp
 else ifeq ($(NX_EIGEN_FFT_LIB),none)
   FFT_SRCS = c_src/nx_eigen_fft_none.cpp
 else
-  $(error Unsupported NX_EIGEN_FFT_LIB value: $(NX_EIGEN_FFT_LIB). Use "fftw", "none", or set NX_EIGEN_FFT_SO.)
+  $(error Unsupported NX_EIGEN_FFT_LIB value: $(NX_EIGEN_FFT_LIB). Use "fftw", "eigen", "none", or set NX_EIGEN_FFT_SO.)
 endif
 
 UNAME_S := $(shell uname -s)

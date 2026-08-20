@@ -9,6 +9,48 @@ NxEigen uses dynamic linking for FFTW. Users need to have FFTW installed on thei
 - macOS: Homebrew (`brew install fftw`)
 - Or use our precompiled binaries which work with system-installed FFTW
 
+## FFT backends
+
+`NX_EIGEN_FFT_LIB` selects the implementation compiled in behind
+`c_src/nx_eigen_fft.h`:
+
+| Value   | Implementation | External dependency |
+| ------- | -------------- | ------------------- |
+| `fftw`  | FFTW3 (default) | `libfftw3`, `libfftw3f` at runtime |
+| `eigen` | Eigen's FFT module (vendored kissfft, MPL-2.0) | none |
+| `none`  | Stubs that raise | none |
+
+`NX_EIGEN_FFT_SO` overrides all of them with a path to your own shared library
+exporting the same symbols.
+
+The `eigen` backend exists for targets with no FFTW, and is what the Nerves
+target uses. Measured back to back on x86_64, f64, per call:
+
+| Length        | FFTW     | Eigen    |
+| ------------- | -------- | -------- |
+| 64            | 7 µs     | 2 µs     |
+| 1024          | 21 µs    | 20 µs    |
+| 4096          | 0.119 ms | 0.127 ms |
+| 65536         | 2.39 ms  | 2.78 ms  |
+| 1021 (prime)  | 0.099 ms | 0.201 ms |
+| 8191 (prime)  | 1.16 ms  | 2.10 ms  |
+| 65521 (prime) | 9.19 ms  | 21.1 ms  |
+
+Within ~1.2x for lengths kissfft factors directly, and ~2x at worst for prime
+lengths. `eigen` wins outright at small sizes because the FFTW backend builds
+and destroys a plan on every call (`FFTW_ESTIMATE`), while the Eigen one caches
+plans per scheduler thread.
+
+kissfft only has butterflies for radix 2/3/4/5 and its generic fallback costs
+O(n · p) for largest prime factor p — an unusable O(n²) at prime lengths, which
+measured 9.6 *seconds* for n=65521 before Bluestein's algorithm was added for
+those lengths. `c_src/nx_eigen_fft_eigen.cpp` switches to Bluestein once the
+largest prime factor exceeds 64, which is roughly where the two costs cross.
+
+Note that the FFT NIFs are registered without dirty-scheduler flags
+(`FINE_NIF(fft_nif, 0)`), so a large transform occupies a normal scheduler for
+its duration on any backend.
+
 ## Building Locally
 
 ### Quick Start with Docker (Local Development)
