@@ -33,12 +33,7 @@ defmodule NxEigen.DocTest do
 
   @unsupported_ops [
     reduce: 4,
-    window_reduce: 5,
-    # FFT requires FFTW library at build time
-    fft: 2,
-    ifft: 2,
-    fft2: 2,
-    ifft2: 2
+    window_reduce: 5
   ]
 
   @sub_byte_types [
