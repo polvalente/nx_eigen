@@ -117,11 +117,36 @@ To build it locally, put the toolchain on your `PATH` and run:
 curl -fsSL https://github.com/nerves-project/toolchains/releases/download/v15.3.0/nerves_toolchain_armv7_nerves_linux_gnueabihf-linux_x86_64-15.3.0-9917D70.tar.xz | tar -xJ
 export PATH="$(pwd)/nerves_toolchain_armv7_nerves_linux_gnueabihf/bin:${PATH}"
 
+# ERTS_INCLUDE_DIR must point at a 32-bit erts include tree — see below.
 MIX_ENV=prod \
   PRECOMPILE_TARGET=armv7-cortex-a7-linux-gnueabihf \
+  ERTS_INCLUDE_DIR="${NERVES_SYSTEM}/staging/usr/lib/erlang/erts-*/include" \
   ELIXIR_MAKE_CACHE_DIR="$(pwd)/cache" \
   mix elixir_make.precompile
 ```
+
+#### The erts include directory is not optional
+
+`erl_int_sizes_config.h` is generated per architecture, and `erl_drv_nif.h`
+picks its 64-bit integer typedefs from it — `SIZEOF_LONG == 8` makes
+`ErlNifUInt64` an `unsigned long`. Build against a 64-bit host's copy while
+targeting a 32-bit ABI and `enif_get_uint64` writes 32 bits into a 64-bit slot:
+the NIF loads, atoms and terms decode, and every 64-bit integer arrives with a
+garbage upper word. `ERL_NIF_TERM` survives because it derives from
+`SIZEOF_VOID_P`, which is why the failure looks like nothing to do with headers.
+
+`cc_precompiler` defaults `ERTS_INCLUDE_DIR` to the build host's unless it is
+already set in the environment, so a cross build has to set it. Nothing in the
+built artifact reveals the mistake — the ELF architecture flags are all correct
+— so `c_src/nx_eigen_nif.cpp` carries `static_assert`s comparing the header's
+`SIZEOF_*` against the compiler's actual ABI, and the build fails instead.
+
+A Nerves project has a suitable tree under
+`$NERVES_SYSTEM/staging/usr/lib/erlang/erts-*/include`. CI has no Nerves system
+to hand, so it copies the runner's own include directory and rewrites
+`SIZEOF_LONG` and `SIZEOF_VOID_P` to 4 — the only two lines that differ from a
+real ILP32 tree, and this keeps the artifact's NIF version matched to the OTP
+release it is named for.
 
 The `scripts/precompile-docker.sh` flow does not cover this target: it builds
 natively in a container per architecture, while this one is cross-compiled.

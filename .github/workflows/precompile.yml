@@ -325,6 +325,35 @@ jobs:
       - name: Print toolchain version
         run: armv7-nerves-linux-gnueabihf-g++ --version
 
+      # erl_int_sizes_config.h is generated per architecture, and the 64-bit
+      # integer typedefs in erl_drv_nif.h are chosen from it, so building
+      # against the host's copy silently breaks enif_get_uint64 on a 32-bit
+      # target. Only SIZEOF_LONG and SIZEOF_VOID_P differ from an ILP32 target's
+      # (verified against the erts include tree of a built Nerves system), so
+      # derive one from this runner's OTP rather than fetching a whole system
+      # artifact on a different OTP release.
+      - name: Derive a 32-bit erts include directory
+        run: |
+          HOST_INCLUDE=$(erl -noshell -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')
+          TARGET_INCLUDE="${{ github.workspace }}/erts-include-ilp32"
+
+          cp -r "${HOST_INCLUDE}" "${TARGET_INCLUDE}"
+          sed -i \
+            -e 's/^#define SIZEOF_LONG 8$/#define SIZEOF_LONG 4/' \
+            -e 's/^#define SIZEOF_VOID_P 8$/#define SIZEOF_VOID_P 4/' \
+            "${TARGET_INCLUDE}/erl_int_sizes_config.h"
+
+          grep -E '^#define SIZEOF_(LONG|VOID_P) ' "${TARGET_INCLUDE}/erl_int_sizes_config.h"
+
+          for want in 'SIZEOF_LONG 4' 'SIZEOF_VOID_P 4'; do
+            grep -qx "#define ${want}" "${TARGET_INCLUDE}/erl_int_sizes_config.h" || {
+              echo "ERROR: failed to set ${want}; has the host header changed shape?"
+              exit 1
+            }
+          done
+
+          echo "ERTS_INCLUDE_DIR=${TARGET_INCLUDE}" >> "${GITHUB_ENV}"
+
       - name: Restore Eigen cache
         uses: actions/cache@v4
         with:
