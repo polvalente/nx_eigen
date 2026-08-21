@@ -3,7 +3,23 @@ defmodule NxEigen.NIF do
 
   def load_nif do
     path = :code.priv_dir(:nx_eigen) |> Path.join("libnx_eigen")
-    :erlang.load_nif(to_charlist(path), 0)
+
+    case :erlang.load_nif(to_charlist(path), 0) do
+      :ok ->
+        :ok
+
+      {:error, _} = error ->
+        # A cross build loads this module on the build host, where the library
+        # it finds is the target's and can't load ("wrong ELF class"). The
+        # firmware is fine, so don't report the host's attempt as a failure.
+        # The device has none of these variables set, so a real load failure
+        # there is still reported.
+        if cross_compiling?(), do: :ok, else: error
+    end
+  end
+
+  defp cross_compiling? do
+    System.get_env("CROSSCOMPILE") != nil or System.get_env("NERVES_SDK_SYSROOT") != nil
   end
 
   # Native functions
