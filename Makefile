@@ -1,4 +1,10 @@
-ERL_INCLUDE_DIR ?= $(shell erl -noshell -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')
+# ERTS_INCLUDE_DIR is exported by cross-compilation environments such as Nerves
+# and points at the target's erts includes rather than the build host's.
+ifdef ERTS_INCLUDE_DIR
+  ERL_INCLUDE_DIR ?= $(ERTS_INCLUDE_DIR)
+else
+  ERL_INCLUDE_DIR ?= $(shell erl -noshell -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')
+endif
 
 # Cross-compilation configuration
 # - Set CROSSCOMPILE to a toolchain prefix (e.g. aarch64-linux-gnu-)
@@ -22,6 +28,7 @@ FINE_INCLUDE ?= $(error FINE_INCLUDE is not set. Use mix compile instead of bare
 #
 # NX_EIGEN_FFT_LIB selects which implementation is compiled in:
 #   fftw  - Use FFTW3 (default for native builds)
+#   eigen - Use Eigen's own FFT module; no external library, slower than FFTW
 #   none  - Disable FFT support (stubs that return errors)
 #
 # NX_EIGEN_FFT_SO overrides NX_EIGEN_FFT_LIB entirely: set it to the
@@ -31,8 +38,11 @@ FINE_INCLUDE ?= $(error FINE_INCLUDE is not set. Use mix compile instead of bare
 NX_EIGEN_FFT_LIB ?= fftw
 NX_EIGEN_FFT_SO  ?=
 
-CFLAGS = -fPIC -I$(ERL_INCLUDE_DIR) -I$(EIGEN_INCLUDE) -I$(FINE_INCLUDE) -Ic_src -O3 -std=c++17
-LDFLAGS = -shared -fvisibility=hidden
+# Inherit CXXFLAGS/LDFLAGS from the environment: cross-compilation environments
+# such as Nerves use them to pass --sysroot and processor-specific flags, and a
+# plain `=` assignment would discard them.
+CFLAGS := $(CXXFLAGS) -fPIC -I$(ERL_INCLUDE_DIR) -I$(EIGEN_INCLUDE) -I$(FINE_INCLUDE) -Ic_src -O3 -std=c++17
+LDFLAGS := $(LDFLAGS) -shared -fvisibility=hidden
 
 # Resolve FFT sources and link flags
 FFT_SRCS =
@@ -61,22 +71,39 @@ else ifeq ($(NX_EIGEN_FFT_LIB),fftw)
   else
     # Fallback for cross-compilation with sysroot
     ifneq ($(CROSSCOMPILE),)
-      ifdef TARGET
+      # Nerves exports its sysroot; otherwise guess the /usr/<triple> layout
+      # Debian's cross packages use, which only means anything when CROSSCOMPILE
+      # is a bare prefix. Under Nerves it is an absolute path, and prefixing it
+      # with /usr/ yielded paths like -I/usr//home/user/.nerves/...
+      ifneq ($(NERVES_SDK_SYSROOT),)
+        SYSROOT ?= $(NERVES_SDK_SYSROOT)
+      else ifdef TARGET
         SYSROOT ?= /usr/$(TARGET)
-      else
+      else ifeq ($(filter /%,$(CROSSCOMPILE)),)
         SYSROOT ?= /usr/$(CROSSCOMPILE:%-=%)
+      else
+        $(error Cannot locate a sysroot for FFTW: set SYSROOT, or NX_EIGEN_FFT_LIB=eigen to build without FFTW.)
       endif
-      FFT_CFLAGS = -I$(SYSROOT)/include
-      FFT_LDFLAGS = -L$(SYSROOT)/lib -lfftw3 -lfftw3f -Wl,-rpath,$(SYSROOT)/lib
+      FFT_CFLAGS = -I$(SYSROOT)/usr/include -I$(SYSROOT)/include
+      FFT_LDFLAGS = -L$(SYSROOT)/usr/lib -L$(SYSROOT)/lib -lfftw3 -lfftw3f -Wl,-rpath,$(SYSROOT)/usr/lib
     else
       # Default: assume system libraries with rpath for common locations
       FFT_LDFLAGS = -lfftw3 -lfftw3f -Wl,-rpath,/usr/lib -Wl,-rpath,/usr/local/lib
     endif
   endif
+else ifeq ($(NX_EIGEN_FFT_LIB),eigen)
+  FFT_SRCS = c_src/nx_eigen_fft_eigen.cpp
 else ifeq ($(NX_EIGEN_FFT_LIB),none)
   FFT_SRCS = c_src/nx_eigen_fft_none.cpp
 else
-  $(error Unsupported NX_EIGEN_FFT_LIB value: $(NX_EIGEN_FFT_LIB). Use "fftw", "none", or set NX_EIGEN_FFT_SO.)
+  $(error Unsupported NX_EIGEN_FFT_LIB value: $(NX_EIGEN_FFT_LIB). Use "fftw", "eigen", "none", or set NX_EIGEN_FFT_SO.)
+endif
+
+# A cross build is headed for a device, where debug info is dead weight: 5.4 MB
+# against 3.6 MB for the same library stripped. Nerves exports STRIP for build
+# systems to use but doesn't strip priv/ contents itself.
+ifneq ($(CROSSCOMPILE),)
+  LDFLAGS += -s
 endif
 
 UNAME_S := $(shell uname -s)
@@ -113,8 +140,10 @@ check-deps:
 		(echo "Failed to download Eigen. Please install manually or set EIGEN_DIR=/path/to/eigen"; exit 1); \
 	fi
 
+# Only the directory being built into: creating a project-root priv/ when
+# MIX_APP_PATH is set makes Mix point every _build/<target>_<env> priv at that
+# one directory, and a host build then overwrites the target's .so.
 $(PRIV_DIR):
-	@mkdir -p priv
 	@mkdir -p "$(PRIV_DIR)"
 
 $(LIB_NAME): c_src/nx_eigen_nif.cpp c_src/nx_eigen_fft.h $(FFT_SRCS) | check-deps $(PRIV_DIR)

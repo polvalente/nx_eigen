@@ -74,6 +74,66 @@ jobs:
           LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
         run: mix test
 
+  # The Eigen FFT backend is what the Nerves target ships, and no runner can
+  # execute that cross-compiled artifact, so exercise the backend here instead.
+  test-linux-eigen-fft:
+    name: Test on Linux (x86_64, Eigen FFT)
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        elixir: ["1.18.1"]
+        otp: ["27.2"]
+    env:
+      MIX_ENV: test
+      NX_EIGEN_FFT_LIB: eigen
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Erlang & Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+
+      # No FFTW: this build must not need it.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Restore Eigen cache
+        uses: actions/cache@v4
+        with:
+          path: eigen-3.4.0
+          key: eigen-3.4.0
+
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      # `make` compares the .so against its sources, so a cached or stale
+      # artifact would be tested instead of an Eigen-FFT build. Start clean.
+      - name: Compile (warnings as errors)
+        run: |
+          rm -f priv/libnx_eigen.so
+          mix compile --warnings-as-errors --force
+
+      - name: Verify the Eigen FFT backend was built
+        run: |
+          readelf -d _build/test/lib/nx_eigen/priv/libnx_eigen.so | grep NEEDED
+
+          if readelf -d _build/test/lib/nx_eigen/priv/libnx_eigen.so | grep -q fftw; then
+            echo "ERROR: build links FFTW despite NX_EIGEN_FFT_LIB=eigen"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: mix test
+
   test-linux-aarch64:
     name: Test on Linux (aarch64)
     runs-on: ubuntu-22.04-arm

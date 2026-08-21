@@ -272,6 +272,7 @@ end
 
 - Linux: x86_64, aarch64, riscv64 (glibc)
 - Arduino Uno Q: aarch64 (**optimized** via `aarch64-arduino-uno-q-linux-gnu`; requires `TARGET_ARCH/TARGET_OS/TARGET_ABI` env vars)
+- Nerves: Cortex-A7 systems such as `nerves_system_trellis` (no configuration needed)
 - macOS: x86_64 (Intel), aarch64 (Apple Silicon)
 
 No need to install FFTW separately - it's statically linked into the precompiled binaries.
@@ -284,6 +285,7 @@ These binaries are produced by GitHub Actions on version tags; see [PRECOMPILATI
 |----------|--------------|-------|
 | Linux (glibc) | x86_64, aarch64, riscv64 | Ubuntu, Debian, Fedora, etc. |
 | **Arduino Uno Q** | **aarch64** | **Optimized with `-march=armv8-a+crypto+crc`** |
+| Nerves (Cortex-A7) | armv7 (hard float) | Built with `-mcpu=cortex-a7 -mfpu=neon-vfpv4`; FFT via Eigen |
 | macOS | x86_64, aarch64 | Intel and Apple Silicon |
 
 The Arduino Uno Q target is specifically optimized for the Qualcomm QRB2210 processor (ARM Cortex-A53) with cryptographic and CRC extensions enabled for maximum performance.
@@ -399,6 +401,40 @@ Check you have the optimized binary:
 # Should show: aarch64-arduino-uno-q-linux-gnu (optimized)
 ls ~/.cache/elixir_make/nx_eigen-nif-*
 ```
+
+## Using with Nerves
+
+Add `nx_eigen` to your Nerves project as usual - no configuration is needed.
+Nerves already exports the `TARGET_*` variables NxEigen uses to pick a binary,
+so `mix firmware` downloads the right one for the target.
+
+```elixir
+def deps do
+  [
+    {:nx, "~> 0.10"},
+    {:nx_eigen, "~> 0.1.0"}
+  ]
+end
+```
+
+Precompiled binaries are published for Cortex-A7 systems, which covers
+`nerves_system_trellis` (the Allwinner T113 board in the Nerves Starter Kit).
+They are built with the same Nerves toolchain the system itself uses, tuned with
+`-mcpu=cortex-a7 -mfpu=neon-vfpv4`.
+
+**FFT works, via Eigen rather than FFTW.** Nerves systems don't ship FFTW, so
+this target is built with `NX_EIGEN_FFT_LIB=eigen` — Eigen's own FFT module,
+which needs no external library. Measured against the FFTW backend it's within
+~1.2x for lengths that factor into small primes and ~2x for prime lengths, so
+no special handling is needed on your side. See
+[FFT backends](PRECOMPILATION.md#fft-backends) for the numbers.
+
+Other Nerves targets - ARMv6 boards such as the Raspberry Pi Zero, and 32-bit
+ARMv7 boards on other CPUs - have no published binary and no NIF will be built
+for them, because a Cortex-A7 binary would fault on those processors. aarch64
+Nerves systems (Raspberry Pi 4/5, and others) resolve to the generic
+`aarch64-linux-gnu` binary, which dynamically links FFTW and so will not load on
+a system that doesn't provide it.
 
 ## License
 

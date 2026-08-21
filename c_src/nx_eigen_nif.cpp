@@ -7,6 +7,26 @@
 
 #include "nx_eigen_fft.h"
 
+// erl_int_sizes_config.h is generated per architecture, and erl_drv_nif.h picks
+// the 64-bit integer typedefs from it: `SIZEOF_LONG == 8` makes ErlNifUInt64 an
+// `unsigned long`. Building against a 64-bit host's headers while targeting a
+// 32-bit ABI therefore leaves enif_get_uint64 writing 32 bits into a 64-bit
+// slot — the NIF loads, terms and atoms decode, and only 64-bit integers come
+// back with a garbage upper word. Nothing about the resulting binary looks
+// wrong, so catch the mismatch here instead.
+static_assert(sizeof(long) == SIZEOF_LONG,
+              "erl_int_sizes_config.h disagrees with the target ABI about "
+              "sizeof(long): ERTS_INCLUDE_DIR is probably the build host's "
+              "rather than the target's.");
+static_assert(sizeof(void *) == SIZEOF_VOID_P,
+              "erl_int_sizes_config.h disagrees with the target ABI about "
+              "sizeof(void *): ERTS_INCLUDE_DIR is probably the build host's "
+              "rather than the target's.");
+static_assert(sizeof(long long) == SIZEOF_LONG_LONG,
+              "erl_int_sizes_config.h disagrees with the target ABI about "
+              "sizeof(long long): ERTS_INCLUDE_DIR is probably the build host's "
+              "rather than the target's.");
+
 // Supported scalar types for EigenTensor
 enum class ScalarType {
   U8,

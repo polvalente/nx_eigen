@@ -9,6 +9,48 @@ NxEigen uses dynamic linking for FFTW. Users need to have FFTW installed on thei
 - macOS: Homebrew (`brew install fftw`)
 - Or use our precompiled binaries which work with system-installed FFTW
 
+## FFT backends
+
+`NX_EIGEN_FFT_LIB` selects the implementation compiled in behind
+`c_src/nx_eigen_fft.h`:
+
+| Value   | Implementation | External dependency |
+| ------- | -------------- | ------------------- |
+| `fftw`  | FFTW3 (default) | `libfftw3`, `libfftw3f` at runtime |
+| `eigen` | Eigen's FFT module (vendored kissfft, MPL-2.0) | none |
+| `none`  | Stubs that raise | none |
+
+`NX_EIGEN_FFT_SO` overrides all of them with a path to your own shared library
+exporting the same symbols.
+
+The `eigen` backend exists for targets with no FFTW, and is what the Nerves
+target uses. Measured back to back on x86_64, f64, per call:
+
+| Length        | FFTW     | Eigen    |
+| ------------- | -------- | -------- |
+| 64            | 7 µs     | 2 µs     |
+| 1024          | 21 µs    | 20 µs    |
+| 4096          | 0.119 ms | 0.127 ms |
+| 65536         | 2.39 ms  | 2.78 ms  |
+| 1021 (prime)  | 0.099 ms | 0.201 ms |
+| 8191 (prime)  | 1.16 ms  | 2.10 ms  |
+| 65521 (prime) | 9.19 ms  | 21.1 ms  |
+
+Within ~1.2x for lengths kissfft factors directly, and ~2x at worst for prime
+lengths. `eigen` wins outright at small sizes because the FFTW backend builds
+and destroys a plan on every call (`FFTW_ESTIMATE`), while the Eigen one caches
+plans per scheduler thread.
+
+kissfft only has butterflies for radix 2/3/4/5 and its generic fallback costs
+O(n · p) for largest prime factor p — an unusable O(n²) at prime lengths, which
+measured 9.6 *seconds* for n=65521 before Bluestein's algorithm was added for
+those lengths. `c_src/nx_eigen_fft_eigen.cpp` switches to Bluestein once the
+largest prime factor exceeds 64, which is roughly where the two costs cross.
+
+Note that the FFT NIFs are registered without dirty-scheduler flags
+(`FINE_NIF(fft_nif, 0)`), so a large transform occupies a normal scheduler for
+its duration on any backend.
+
 ## Building Locally
 
 ### Quick Start with Docker (Local Development)
@@ -55,6 +97,87 @@ The `scripts/precompile-docker.sh` builds these targets by default:
 **Optional targets** (can be enabled in the script):
 
 - `riscv64-linux-gnu` - RISC-V 64-bit Linux (requires RISC-V emulation setup)
+
+### Nerves (cross-compiled)
+
+- `armv7-cortex-a7-linux-gnueabihf` - Nerves systems on a Cortex-A7, such as
+  `nerves_system_trellis` (Allwinner T113, the Nerves Starter Kit board)
+
+This target is cross-compiled with the same Nerves toolchain the system is built
+with (`armv7_nerves_linux_gnueabihf`), so the glibc and libstdc++ it links
+against match those in the system.
+
+Nerves systems do not ship FFTW, so `mix.exs` builds this target with
+`NX_EIGEN_FFT_LIB=eigen` — Eigen's own FFT module, which needs no external
+library. See [FFT backends](#fft-backends) for the trade-off.
+
+To build it locally, put the toolchain on your `PATH` and run:
+
+```bash
+curl -fsSL https://github.com/nerves-project/toolchains/releases/download/v15.3.0/nerves_toolchain_armv7_nerves_linux_gnueabihf-linux_x86_64-15.3.0-9917D70.tar.xz | tar -xJ
+export PATH="$(pwd)/nerves_toolchain_armv7_nerves_linux_gnueabihf/bin:${PATH}"
+
+# ERTS_INCLUDE_DIR must point at a 32-bit erts include tree — see below.
+MIX_ENV=prod \
+  PRECOMPILE_TARGET=armv7-cortex-a7-linux-gnueabihf \
+  ERTS_INCLUDE_DIR="${NERVES_SYSTEM}/staging/usr/lib/erlang/erts-*/include" \
+  ELIXIR_MAKE_CACHE_DIR="$(pwd)/cache" \
+  mix elixir_make.precompile
+```
+
+#### The erts include directory is not optional
+
+`erl_int_sizes_config.h` is generated per architecture, and `erl_drv_nif.h`
+picks its 64-bit integer typedefs from it — `SIZEOF_LONG == 8` makes
+`ErlNifUInt64` an `unsigned long`. Build against a 64-bit host's copy while
+targeting a 32-bit ABI and `enif_get_uint64` writes 32 bits into a 64-bit slot:
+the NIF loads, atoms and terms decode, and every 64-bit integer arrives with a
+garbage upper word. `ERL_NIF_TERM` survives because it derives from
+`SIZEOF_VOID_P`, which is why the failure looks like nothing to do with headers.
+
+`cc_precompiler` defaults `ERTS_INCLUDE_DIR` to the build host's unless it is
+already set in the environment, so a cross build has to set it. Nothing in the
+built artifact reveals the mistake — the ELF architecture flags are all correct
+— so `c_src/nx_eigen_nif.cpp` carries `static_assert`s comparing the header's
+`SIZEOF_*` against the compiler's actual ABI, and the build fails instead.
+
+A Nerves project has a suitable tree under
+`$NERVES_SYSTEM/staging/usr/lib/erlang/erts-*/include`. CI has no Nerves system
+to hand, so it copies the runner's own include directory and rewrites
+`SIZEOF_LONG` and `SIZEOF_VOID_P` to 4 — the only two lines that differ from a
+real ILP32 tree, and this keeps the artifact's NIF version matched to the OTP
+release it is named for.
+
+That derivation covers what the NIF actually includes: `erl_nif.h` pulls in
+`erl_drv_nif.h`, which pulls in `erl_int_sizes_config.h`, and nothing else.
+`internal/ethread_header_config.h` also differs between host and ILP32 trees
+(`ETHR_SIZEOF_PTR`, the ARM barrier-instruction flags, and more) and is left
+with host values. Preprocessing `c_src/nx_eigen_nif.cpp` reaches none of it, but
+anything that starts including `erl_threads.h` or the ethread internals would
+be wrong in the same silent way, and the `static_assert`s would not catch it.
+
+The `scripts/precompile-docker.sh` flow does not cover this target: it builds
+natively in a container per architecture, while this one is cross-compiled.
+
+#### How Nerves devices resolve a target
+
+Nerves exports `TARGET_ARCH=arm`, `TARGET_OS=linux` and `TARGET_ABI=gnueabihf`
+for *every* 32-bit ARM board, so `cc_precompiler` resolves ARMv6 and ARMv7
+devices to the same `arm-linux-gnueabihf` triplet. `NxEigen.Precompiler` (in
+`precompiler.exs`) refines that triplet using `TARGET_CPU`:
+
+| `TARGET_CPU`   | Target                            | Published |
+| -------------- | --------------------------------- | --------- |
+| `cortex_a7`    | `armv7-cortex-a7-linux-gnueabihf` | Yes       |
+| `arm1176*`     | `armv6-linux-gnueabihf`           | No        |
+| anything else  | `arm-linux-gnueabihf`             | No        |
+
+Unpublished targets fall back to `:ignore`, so boards we have not built for get
+no NIF rather than a binary that faults with an illegal instruction.
+
+When adding a target, add it to **both** the compiler map in `mix.exs` and
+`@published_targets` in `precompiler.exs` - the latter is what a consumer uses
+to work out the download URL.
 
 ### macOS (Native builds only)
 
@@ -134,18 +257,30 @@ mix elixir_make.precompile
 
 This will create `.tar.gz` files in the `cache` directory.
 
+## Never commit `checksum.exs` from a local precompile
+
+`mix elixir_make.precompile` finishes by writing `checksum.exs` with **only the
+artifacts it just built**, deleting every other entry. Committing that file
+after a local run removes the checksums for every published platform, and
+`ElixirMake.Artefact` then raises `precompiled "..." does not exist in
+checksum.exs` for all of them — the package stops installing everywhere.
+
+The file is only ever regenerated wholesale, from a release that already has
+every artifact attached, by the step below. If a local precompile has dirtied
+it, `git checkout checksum.exs`.
+
 ## After Release: Generate Checksum
 
 After GitHub Actions has uploaded all precompiled binaries to the release:
 
 ```bash
-# Download all artifacts and generate checksum file
-# PRECOMPILE_TARGET=all is required to include all OS/arch combinations,
-# not just the native architecture of the machine running the command.
-MIX_ENV=prod PRECOMPILE_TARGET=all mix elixir_make.checksum --all --print
+# Download all artifacts and generate checksum file.
+# `NxEigen.Precompiler` reports every published target regardless of the host,
+# so no PRECOMPILE_TARGET is needed here.
+MIX_ENV=prod mix elixir_make.checksum --all --print
 
 # Or if some targets are not yet available:
-MIX_ENV=prod PRECOMPILE_TARGET=all mix elixir_make.checksum --all --print --ignore-unavailable
+MIX_ENV=prod mix elixir_make.checksum --all --print --ignore-unavailable
 ```
 
 This creates `checksum.exs` which **must be committed** and included in the package.
@@ -219,7 +354,7 @@ mix elixir_make.precompile
 1. ✅ Update version in `mix.exs`
 2. ✅ Commit and tag: `git tag v0.1.0 && git push origin v0.1.0`
 3. ✅ Wait for GitHub Actions to complete
-4. ✅ Generate checksum: `MIX_ENV=prod PRECOMPILE_TARGET=all mix elixir_make.checksum --all --print` (wait for all CI jobs to finish first)
+4. ✅ Generate checksum: `MIX_ENV=prod mix elixir_make.checksum --all --print` (wait for all CI jobs to finish first)
 5. ✅ Commit checksum file: `git add checksum.exs && git commit -m "Add checksums for vX.Y.Z"`
 6. ✅ Publish to Hex: `mix hex.publish`
 

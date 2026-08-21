@@ -112,13 +112,18 @@ elseif(NX_EIGEN_FFT_LIB STREQUAL "fftw")
     message(STATUS "FFT support: FFTW3 (direct link)")
   endif()
 
+elseif(NX_EIGEN_FFT_LIB STREQUAL "eigen")
+  # ── Eigen's own FFT module (no external library) ───────────────────
+  target_sources(nx_eigen PRIVATE c_src/nx_eigen_fft_eigen.cpp)
+  message(STATUS "FFT support: Eigen FFT module (no external library)")
+
 elseif(NX_EIGEN_FFT_LIB STREQUAL "none")
   # ── Stubs (FFT disabled) ───────────────────────────────────────────
   target_sources(nx_eigen PRIVATE c_src/nx_eigen_fft_none.cpp)
   message(STATUS "FFT support: disabled (NX_EIGEN_FFT_LIB=none)")
 
 else()
-  message(FATAL_ERROR "Unsupported NX_EIGEN_FFT_LIB value: ${NX_EIGEN_FFT_LIB}. Use \"fftw\", \"none\", or set NX_EIGEN_FFT_SO.")
+  message(FATAL_ERROR "Unsupported NX_EIGEN_FFT_LIB value: ${NX_EIGEN_FFT_LIB}. Use \"fftw\", \"eigen\", \"none\", or set NX_EIGEN_FFT_SO.")
 endif()
 
 # NIFs on macOS typically use dynamic lookup instead of linking to libErlang.
