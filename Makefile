@@ -71,13 +71,21 @@ else ifeq ($(NX_EIGEN_FFT_LIB),fftw)
   else
     # Fallback for cross-compilation with sysroot
     ifneq ($(CROSSCOMPILE),)
-      ifdef TARGET
+      # Nerves exports its sysroot; otherwise guess the /usr/<triple> layout
+      # Debian's cross packages use, which only means anything when CROSSCOMPILE
+      # is a bare prefix. Under Nerves it is an absolute path, and prefixing it
+      # with /usr/ yielded paths like -I/usr//home/user/.nerves/...
+      ifneq ($(NERVES_SDK_SYSROOT),)
+        SYSROOT ?= $(NERVES_SDK_SYSROOT)
+      else ifdef TARGET
         SYSROOT ?= /usr/$(TARGET)
-      else
+      else ifeq ($(filter /%,$(CROSSCOMPILE)),)
         SYSROOT ?= /usr/$(CROSSCOMPILE:%-=%)
+      else
+        $(error Cannot locate a sysroot for FFTW: set SYSROOT, or NX_EIGEN_FFT_LIB=eigen to build without FFTW.)
       endif
-      FFT_CFLAGS = -I$(SYSROOT)/include
-      FFT_LDFLAGS = -L$(SYSROOT)/lib -lfftw3 -lfftw3f -Wl,-rpath,$(SYSROOT)/lib
+      FFT_CFLAGS = -I$(SYSROOT)/usr/include -I$(SYSROOT)/include
+      FFT_LDFLAGS = -L$(SYSROOT)/usr/lib -L$(SYSROOT)/lib -lfftw3 -lfftw3f -Wl,-rpath,$(SYSROOT)/usr/lib
     else
       # Default: assume system libraries with rpath for common locations
       FFT_LDFLAGS = -lfftw3 -lfftw3f -Wl,-rpath,/usr/lib -Wl,-rpath,/usr/local/lib

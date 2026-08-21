@@ -285,7 +285,7 @@ These binaries are produced by GitHub Actions on version tags; see [PRECOMPILATI
 |----------|--------------|-------|
 | Linux (glibc) | x86_64, aarch64, riscv64 | Ubuntu, Debian, Fedora, etc. |
 | **Arduino Uno Q** | **aarch64** | **Optimized with `-march=armv8-a+crypto+crc`** |
-| Nerves (Cortex-A7) | armv7 (hard float) | Built with `-mcpu=cortex-a7 -mfpu=neon-vfpv4`; no FFT support |
+| Nerves (Cortex-A7) | armv7 (hard float) | Built with `-mcpu=cortex-a7 -mfpu=neon-vfpv4`; FFT via Eigen |
 | macOS | x86_64, aarch64 | Intel and Apple Silicon |
 
 The Arduino Uno Q target is specifically optimized for the Qualcomm QRB2210 processor (ARM Cortex-A53) with cryptographic and CRC extensions enabled for maximum performance.

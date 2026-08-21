@@ -77,15 +77,24 @@ defmodule NxEigen.MixProject do
     |> forward_env("NX_EIGEN_FFT_SO")
   end
 
-  # Nerves systems don't ship FFTW, so the Cortex-A7 target builds against
-  # Eigen's own FFT module instead. `forward_env` runs after this, so an
-  # explicit NX_EIGEN_FFT_LIB still wins.
+  # Nerves systems don't ship FFTW, so anything built for one uses Eigen's own
+  # FFT module instead. This covers both our own cross builds, which set
+  # PRECOMPILE_TARGET, and a source build inside a Nerves project — which is
+  # what happens whenever no precompiled artifact matches the device, and which
+  # would otherwise fail on a missing fftw3.h.
+  #
+  # `forward_env` runs after this, so an explicit NX_EIGEN_FFT_LIB still wins:
+  # a system that does carry FFTW (via NBPR, say) can ask for it, and Nerves
+  # points pkg-config at the system for finding it.
   defp target_fft_lib do
-    case System.get_env("PRECOMPILE_TARGET") do
-      @cortex_a7_target -> %{"NX_EIGEN_FFT_LIB" => "eigen"}
-      _ -> %{}
+    if System.get_env("PRECOMPILE_TARGET") == @cortex_a7_target or nerves_build?() do
+      %{"NX_EIGEN_FFT_LIB" => "eigen"}
+    else
+      %{}
     end
   end
+
+  defp nerves_build?, do: System.get_env("NERVES_SDK_SYSROOT") != nil
 
   defp forward_env(env, var) do
     case System.get_env(var) do
