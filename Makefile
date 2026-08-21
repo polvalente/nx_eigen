@@ -133,8 +133,10 @@ check-deps:
 		(echo "Failed to download Eigen. Please install manually or set EIGEN_DIR=/path/to/eigen"; exit 1); \
 	fi
 
+# Only the directory being built into: creating a project-root priv/ when
+# MIX_APP_PATH is set makes Mix point every _build/<target>_<env> priv at that
+# one directory, and a host build then overwrites the target's .so.
 $(PRIV_DIR):
-	@mkdir -p priv
 	@mkdir -p "$(PRIV_DIR)"
 
 $(LIB_NAME): c_src/nx_eigen_nif.cpp c_src/nx_eigen_fft.h $(FFT_SRCS) | check-deps $(PRIV_DIR)
