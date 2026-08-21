@@ -148,6 +148,14 @@ to hand, so it copies the runner's own include directory and rewrites
 real ILP32 tree, and this keeps the artifact's NIF version matched to the OTP
 release it is named for.
 
+That derivation covers what the NIF actually includes: `erl_nif.h` pulls in
+`erl_drv_nif.h`, which pulls in `erl_int_sizes_config.h`, and nothing else.
+`internal/ethread_header_config.h` also differs between host and ILP32 trees
+(`ETHR_SIZEOF_PTR`, the ARM barrier-instruction flags, and more) and is left
+with host values. Preprocessing `c_src/nx_eigen_nif.cpp` reaches none of it, but
+anything that starts including `erl_threads.h` or the ethread internals would
+be wrong in the same silent way, and the `static_assert`s would not catch it.
+
 The `scripts/precompile-docker.sh` flow does not cover this target: it builds
 natively in a container per architecture, while this one is cross-compiled.
 
@@ -248,6 +256,18 @@ mix elixir_make.precompile
 ```
 
 This will create `.tar.gz` files in the `cache` directory.
+
+## Never commit `checksum.exs` from a local precompile
+
+`mix elixir_make.precompile` finishes by writing `checksum.exs` with **only the
+artifacts it just built**, deleting every other entry. Committing that file
+after a local run removes the checksums for every published platform, and
+`ElixirMake.Artefact` then raises `precompiled "..." does not exist in
+checksum.exs` for all of them — the package stops installing everywhere.
+
+The file is only ever regenerated wholesale, from a release that already has
+every artifact attached, by the step below. If a local precompile has dirtied
+it, `git checkout checksum.exs`.
 
 ## After Release: Generate Checksum
 
