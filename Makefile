@@ -99,6 +99,13 @@ else
   $(error Unsupported NX_EIGEN_FFT_LIB value: $(NX_EIGEN_FFT_LIB). Use "fftw", "eigen", "none", or set NX_EIGEN_FFT_SO.)
 endif
 
+# A cross build is headed for a device, where debug info is dead weight: 5.4 MB
+# against 3.6 MB for the same library stripped. Nerves exports STRIP for build
+# systems to use but doesn't strip priv/ contents itself.
+ifneq ($(CROSSCOMPILE),)
+  LDFLAGS += -s
+endif
+
 UNAME_S := $(shell uname -s)
 TARGET_OS ?= $(UNAME_S)
 ifeq ($(TARGET_OS),Darwin)
