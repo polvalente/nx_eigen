@@ -43,26 +43,35 @@ template <typename T> Eigen::FFT<T> &fft_for_thread() {
   return fft;
 }
 
-int largest_prime_factor(int n) {
-  int largest = 1;
-
-  for (int p = 2; p <= n / p; ++p) {
-    while (n % p == 0) {
-      largest = p;
-      n /= p;
-    }
-  }
-
-  return n > 1 ? n : largest;
-}
-
 // kissfft's generic butterfly costs about n*p for largest prime factor p, while
 // Bluestein costs three power-of-two transforms of m >= 2n-1, about 6*n*log2(m).
 // The two cross over around p == 6*log2(2n), which is in the sixties for the
 // lengths this is likely to see, so that's the threshold. Below it the direct
 // transform is cheaper and exact; above it the generic butterfly is the one
 // that turns into seconds.
-bool prefer_bluestein(int n) { return largest_prime_factor(n) > 64; }
+bool prefer_bluestein(int n) {
+  static constexpr int kPrimes[] = {2,  3,  5,  7,  11, 13, 17, 19, 23,
+                                    29, 31, 37, 41, 43, 47, 53, 59, 61};
+
+  for (int p : kPrimes) {
+    if (p > n / p) {
+      // p is too large to be a factor of n.
+      // Check if n is greater than 64, because if it is, we can use Bluestein's algorithm.
+      return n > 64;
+    }
+    while (n % p == 0) {
+      // Remove all factors of p from n.
+      n /= p;
+    }
+
+    if (n == 1) {
+      return false;
+    }
+  }
+
+  // If we've exhausted the "small primes" and n is still greater than 64, we can use Bluestein's algorithm.
+  return n > 64;
+}
 
 // exp(direction * i * pi * k^2 / n), with k^2 reduced mod 2n first so the
 // angle stays small enough for cos/sin to keep their precision at large k.
