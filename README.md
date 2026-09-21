@@ -86,7 +86,7 @@ Two environment variables control FFT at build time:
 
 | Variable             | Values / meaning                                                     |
 |----------------------|----------------------------------------------------------------------|
-| `NX_EIGEN_FFT_LIB`  | `fftw` **(default)** · `none` (stubs that return errors)             |
+| `NX_EIGEN_FFT_LIB`  | `fftw` **(default)** · `eigen` (Eigen's FFT module, no external library) · `none` (stubs that return errors) |
 | `NX_EIGEN_FFT_SO`   | Absolute path to a custom `.so` – **overrides** `NX_EIGEN_FFT_LIB`  |
 
 Examples:
@@ -156,6 +156,7 @@ This project builds a NIF (`priv/libnx_eigen.so`) via `make`. For cross-compilat
 - **Set a toolchain**: `CROSSCOMPILE` (prefix) or `CXX` (full path)
 - **Set the target OS** (so we don't add macOS-only linker flags): `TARGET_OS=Linux|Darwin`
 - **FFT**: disable with `NX_EIGEN_FFT_LIB=none`, or provide a custom `.so` with `NX_EIGEN_FFT_SO=/path/to/lib.so`
+- **Debug symbols**: cross builds are stripped by default; set `NX_EIGEN_STRIP=0` to keep them
 - **(If needed)** override `ERL_INCLUDE_DIR` to a matching Erlang/OTP include directory
 
 Example (toolchain-prefix style):
@@ -285,7 +286,7 @@ These binaries are produced by GitHub Actions on version tags; see [PRECOMPILATI
 |----------|--------------|-------|
 | Linux (glibc) | x86_64, aarch64, riscv64 | Ubuntu, Debian, Fedora, etc. |
 | **Arduino Uno Q** | **aarch64** | **Optimized with `-march=armv8-a+crypto+crc`** |
-| Nerves (Cortex-A7) | armv7 (hard float) | Built with `-mcpu=cortex-a7 -mfpu=neon-vfpv4`; FFT via Eigen |
+| Linux (glibc) | armv7 hard-float | Cortex-A7 (`-mcpu=cortex-a7 -mfpu=neon-vfpv4`), FFT via Eigen; covers Nerves armv7 targets |
 | macOS | x86_64, aarch64 | Intel and Apple Silicon |
 
 The Arduino Uno Q target is specifically optimized for the Qualcomm QRB2210 processor (ARM Cortex-A53) with cryptographic and CRC extensions enabled for maximum performance.

@@ -1,10 +1,6 @@
 # ERTS_INCLUDE_DIR is exported by cross-compilation environments such as Nerves
 # and points at the target's erts includes rather than the build host's.
-ifdef ERTS_INCLUDE_DIR
-  ERL_INCLUDE_DIR ?= $(ERTS_INCLUDE_DIR)
-else
-  ERL_INCLUDE_DIR ?= $(shell erl -noshell -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')
-endif
+ERL_INCLUDE_DIR ?= $(or $(ERTS_INCLUDE_DIR),$(shell erl -noshell -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().'))
 
 # Cross-compilation configuration
 # - Set CROSSCOMPILE to a toolchain prefix (e.g. aarch64-linux-gnu-)
@@ -99,10 +95,12 @@ else
   $(error Unsupported NX_EIGEN_FFT_LIB value: $(NX_EIGEN_FFT_LIB). Use "fftw", "eigen", "none", or set NX_EIGEN_FFT_SO.)
 endif
 
-# A cross build is headed for a device, where debug info is dead weight: 5.4 MB
-# against 3.6 MB for the same library stripped. Nerves exports STRIP for build
-# systems to use but doesn't strip priv/ contents itself.
-ifneq ($(CROSSCOMPILE),)
+# A cross build is usually headed for a device, where debug info is dead weight:
+# 5.4 MB against 3.6 MB for the same library stripped. Nerves exports STRIP for
+# build systems to use but doesn't strip priv/ contents itself. Set
+# NX_EIGEN_STRIP=0 to keep the symbols when debugging a cross build.
+NX_EIGEN_STRIP ?= $(if $(CROSSCOMPILE),1,0)
+ifeq ($(NX_EIGEN_STRIP),1)
   LDFLAGS += -s
 endif
 
