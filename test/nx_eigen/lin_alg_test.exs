@@ -7,6 +7,14 @@ defmodule NxEigen.LinAlgTest do
     :ok
   end
 
+  # The generic factorization is a defn. It follows the process default
+  # backend, so the reference has to run with BinaryBackend selected.
+  defp binary_cholesky(tensor) do
+    Nx.with_default_backend(Nx.BinaryBackend, fn ->
+      Nx.LinAlg.cholesky(Nx.backend_copy(tensor, Nx.BinaryBackend))
+    end)
+  end
+
   @rounding_error_linalg [
     cholesky: 1,
     determinant: 1,
@@ -87,6 +95,89 @@ defmodule NxEigen.LinAlgTest do
 
       # Complex support might vary, checking if it runs and matches
       assert_all_close(Nx.LinAlg.cholesky(t), expected)
+    end
+
+    test "positive-definite matrix matches the binary backend" do
+      draw = Nx.iota({8, 8}, type: :f64)
+      a = Nx.add(Nx.dot(draw, Nx.transpose(draw)), Nx.eye({8, 8}, type: :f64))
+      got = Nx.LinAlg.cholesky(a)
+
+      assert_all_close(got, binary_cholesky(a), atol: 1.0e-8, rtol: 1.0e-8)
+    end
+
+    test "integer input is factored in floating point" do
+      a = Nx.tensor([[4, 2], [2, 3]], type: :s32)
+      got = Nx.LinAlg.cholesky(a)
+
+      assert got.type == {:f, 32}
+      assert_all_close(got, binary_cholesky(a))
+    end
+
+    test "ill conditioned factor reconstructs the matrix" do
+      a = Nx.tensor([[1.0, 1.0], [1.0, 1.0 + 1.0e-8]], type: :f64)
+      factor = Nx.LinAlg.cholesky(a)
+
+      assert_all_close(Nx.dot(factor, Nx.transpose(factor)), a, atol: 1.0e-8)
+    end
+
+    test "a batch with one non positive-definite matrix matches the generic factorization" do
+      a =
+        Nx.tensor(
+          [
+            [[2.0, 0.0], [0.0, 2.0]],
+            [[1.0, 2.0], [2.0, 1.0]]
+          ],
+          type: :f64
+        )
+
+      assert NxEigen.NIF.positive_hermitian?(a.data.state)
+      got = Nx.LinAlg.cholesky(a) |> Nx.backend_copy(Nx.BinaryBackend)
+      expected = binary_cholesky(a)
+
+      assert_equal(Nx.is_nan(got), Nx.is_nan(expected))
+
+      finite = Nx.select(Nx.is_nan(got), 0, got)
+      finite_expected = Nx.select(Nx.is_nan(expected), 0, expected)
+      assert_all_close(finite, finite_expected)
+    end
+
+    test "a matrix that is not hermitian matches the generic factorization" do
+      a = Nx.tensor([[1.0, 3.0], [0.0, 1.0]], type: :f64)
+      refute NxEigen.NIF.positive_hermitian?(a.data.state)
+      got = Nx.LinAlg.cholesky(a) |> Nx.backend_copy(Nx.BinaryBackend)
+      expected = binary_cholesky(a)
+
+      assert_equal(Nx.is_nan(got), Nx.is_nan(expected))
+
+      finite = Nx.select(Nx.is_nan(got), 0, got)
+      finite_expected = Nx.select(Nx.is_nan(expected), 0, expected)
+      assert_all_close(finite, finite_expected)
+    end
+
+    test "a negative diagonal matches the generic factorization" do
+      a = Nx.tensor([[1.0, 0.0], [0.0, -2.0]], type: :f64)
+      refute NxEigen.NIF.positive_hermitian?(a.data.state)
+      got = Nx.LinAlg.cholesky(a) |> Nx.backend_copy(Nx.BinaryBackend)
+      expected = binary_cholesky(a)
+
+      assert_equal(Nx.is_nan(got), Nx.is_nan(expected))
+
+      finite = Nx.select(Nx.is_nan(got), 0, got)
+      finite_expected = Nx.select(Nx.is_nan(expected), 0, expected)
+      assert_all_close(finite, finite_expected)
+    end
+
+    test "non positive-definite input matches the generic factorization" do
+      a = Nx.tensor([[1.0, 2.0], [2.0, 1.0]], type: :f64)
+      assert NxEigen.NIF.positive_hermitian?(a.data.state)
+      got = Nx.LinAlg.cholesky(a) |> Nx.backend_copy(Nx.BinaryBackend)
+      expected = binary_cholesky(a)
+
+      assert_equal(Nx.is_nan(got), Nx.is_nan(expected))
+
+      finite = Nx.select(Nx.is_nan(got), 0, got)
+      finite_expected = Nx.select(Nx.is_nan(expected), 0, expected)
+      assert_all_close(finite, finite_expected)
     end
 
     test "vectorized cholesky" do

@@ -45,6 +45,25 @@ defmodule NxEigen.Backend do
   end
 
   @impl true
+  def block(%Nx.Block.LinAlg.Cholesky{} = block, output, [tensor] = args, default_impl) do
+    typed = maybe_upcast(tensor, output.type)
+
+    # A failed LLT walks the matrix. Skip it unless every batch is
+    # Hermitian and the diagonal is positive.
+    if NxEigen.NIF.positive_hermitian?(typed.data.state) do
+      case NxEigen.NIF.cholesky(typed.data.state) do
+        {:ok, state} ->
+          %{output | data: %__MODULE__{state: state}}
+
+        :error ->
+          apply(default_impl, [block | args])
+      end
+    else
+      apply(default_impl, [block | args])
+    end
+  end
+
+  @impl true
   def block(block, _output, args, default_impl) do
     apply(default_impl, [block | args])
   end
