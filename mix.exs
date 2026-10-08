@@ -17,6 +17,16 @@ defmodule NxEigen.MixProject do
   @cortex_a7_target "armv7-cortex-a7-linux-gnueabihf"
   @nerves_armv7_prefix "armv7-nerves-linux-gnueabihf-"
 
+  # GCC 15 binds libm float entry points to GLIBC_2.43. Nerves systems still on
+  # the 13.2 toolchain ship glibc 2.38 and cannot load that binary. This one is
+  # built with 13.2, and glibc 2.43 keeps those older versions, so it also loads
+  # on current aarch64 systems (rpi4, rpi5). No -mcpu: those boards are
+  # Cortex-A72 and Cortex-A76, and the toolchain default is baseline armv8-a.
+  # -fPIE/-pie are left out because they conflict with a shared library.
+  @aarch64_nerves_flags "-mabi=lp64 -fstack-protector-strong -s -Wl,-z,now -Wl,-z,relro"
+  @aarch64_nerves_target "aarch64-nerves-linux-gnu"
+  @nerves_aarch64_prefix "aarch64-nerves-linux-gnu-"
+
   def project do
     [
       app: :nx_eigen,
@@ -78,7 +88,7 @@ defmodule NxEigen.MixProject do
   end
 
   # Nerves systems don't ship FFTW, so anything built for one uses Eigen's own
-  # FFT module instead. This covers both our own cross builds, which set
+  # FFT module instead. This covers the published Nerves targets, which set
   # PRECOMPILE_TARGET, and a source build inside a Nerves project — which is
   # what happens whenever no precompiled artifact matches the device, and which
   # would otherwise fail on a missing fftw3.h.
@@ -87,7 +97,8 @@ defmodule NxEigen.MixProject do
   # a system that does carry FFTW (via NBPR, say) can ask for it, and Nerves
   # points pkg-config at the system for finding it.
   defp target_fft_lib do
-    if System.get_env("PRECOMPILE_TARGET") == @cortex_a7_target or nerves_build?() do
+    if System.get_env("PRECOMPILE_TARGET") in [@cortex_a7_target, @aarch64_nerves_target] or
+         nerves_build?() do
       %{"NX_EIGEN_FFT_LIB" => "eigen"}
     else
       %{}
@@ -210,6 +221,9 @@ defmodule NxEigen.MixProject do
           @cortex_a7_target ->
             cortex_a7_target()
 
+          @aarch64_nerves_target ->
+            aarch64_nerves_target()
+
           "riscv64-linux-gnu" ->
             linux_target("riscv64-linux-gnu")
 
@@ -231,6 +245,19 @@ defmodule NxEigen.MixProject do
       )
     )
     |> Map.merge(cortex_a7_target())
+    |> Map.merge(aarch64_nerves_target())
+  end
+
+  defp aarch64_nerves_target do
+    %{
+      @aarch64_nerves_target =>
+        toolchain(
+          "#{@nerves_aarch64_prefix}gcc",
+          "#{@nerves_aarch64_prefix}g++",
+          "#{@cc_template} #{@aarch64_nerves_flags}",
+          "#{@cxx_template} #{@aarch64_nerves_flags}"
+        )
+    }
   end
 
   # Built with the Nerves toolchain so that the glibc and libstdc++ the NIF links

@@ -8,6 +8,10 @@ defmodule NxEigen.Precompiler do
   # on the others. TARGET_CPU is the only thing that tells them apart, so the
   # triplet is refined with it here.
   #
+  # aarch64 Nerves exports the same TARGET_ARCH/OS/ABI as generic Linux, so the
+  # triplet would be aarch64-linux-gnu, whose binary links FFTW. A firmware
+  # build sets NERVES_SDK_SYSROOT; a desktop build does not.
+  #
   # The `:fetch` targets are listed rather than delegated because cc_precompiler
   # derives them from the compilers it can find on the machine doing the
   # fetching, which never includes cross-compiled targets.
@@ -19,6 +23,7 @@ defmodule NxEigen.Precompiler do
     "aarch64-apple-darwin",
     "aarch64-arduino-uno-q-linux-gnu",
     "aarch64-linux-gnu",
+    "aarch64-nerves-linux-gnu",
     "armv7-cortex-a7-linux-gnueabihf",
     "x86_64-apple-darwin",
     "x86_64-linux-gnu"
@@ -32,6 +37,7 @@ defmodule NxEigen.Precompiler do
   def current_target do
     case cc_precompiler(:current_target, []) do
       {:ok, "arm-linux-gnueabihf"} -> {:ok, arm_target(System.get_env("TARGET_CPU"))}
+      {:ok, "aarch64-linux-gnu"} -> {:ok, aarch64_target()}
       other -> other
     end
   end
@@ -41,6 +47,12 @@ defmodule NxEigen.Precompiler do
   def precompile(args, target), do: cc_precompiler(:precompile, [args, target])
 
   def unavailable_target(target), do: cc_precompiler(:unavailable_target, [target])
+
+  defp aarch64_target do
+    if System.get_env("NERVES_SDK_SYSROOT"),
+      do: "aarch64-nerves-linux-gnu",
+      else: "aarch64-linux-gnu"
+  end
 
   defp arm_target("cortex_a7"), do: "armv7-cortex-a7-linux-gnueabihf"
   defp arm_target("arm1176" <> _), do: "armv6-linux-gnueabihf"

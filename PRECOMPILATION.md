@@ -102,16 +102,40 @@ The `scripts/precompile-docker.sh` builds these targets by default:
 
 - `armv7-cortex-a7-linux-gnueabihf` - Nerves systems on a Cortex-A7, such as
   `nerves_system_trellis` (Allwinner T113, the Nerves Starter Kit board)
+- `aarch64-nerves-linux-gnu` - Nerves aarch64 systems, such as
+  `nerves_system_rpi4` and `nerves_system_rpi5`
 
-This target is cross-compiled with the same Nerves toolchain the system is built
-with (`armv7_nerves_linux_gnueabihf`), so the glibc and libstdc++ it links
+The armv7 target is cross-compiled with the same Nerves toolchain the system is
+built with (`armv7_nerves_linux_gnueabihf`), so the glibc and libstdc++ it links
 against match those in the system.
 
-Nerves systems do not ship FFTW, so `mix.exs` builds this target with
+The aarch64 target is cross-compiled with Nerves toolchain 13.2.0
+(`aarch64_nerves_linux_gnu`, glibc 2.38). GCC 15 binds several libm float
+symbols to GLIBC_2.43, and systems still on 13.2 cannot load that binary.
+glibc 2.43 still provides the versions GCC 13 emits, so the same artifact loads
+on the current rpi4 and rpi5 images. The toolchain default is baseline armv8-a,
+with no `-mcpu`, because those boards are Cortex-A72 and Cortex-A76.
+
+Nerves systems do not ship FFTW, so `mix.exs` builds both targets with
 `NX_EIGEN_FFT_LIB=eigen` — Eigen's own FFT module, which needs no external
 library. See [FFT backends](#fft-backends) for the trade-off.
 
-To build it locally, put the toolchain on your `PATH` and run:
+aarch64 is LP64, same as the build host, so the host erts include directory is
+the right one. The 32-bit rewrite below does not apply to this target.
+
+To build the aarch64 target locally, put the toolchain on your `PATH` and run:
+
+```bash
+curl -fsSL https://github.com/nerves-project/toolchains/releases/download/v13.2.0/nerves_toolchain_aarch64_nerves_linux_gnu-linux_x86_64-13.2.0-CE4B5F8.tar.xz | tar -xJ
+export PATH="$(pwd)/nerves_toolchain_aarch64_nerves_linux_gnu/bin:${PATH}"
+
+MIX_ENV=prod \
+  PRECOMPILE_TARGET=aarch64-nerves-linux-gnu \
+  ELIXIR_MAKE_CACHE_DIR="$(pwd)/cache" \
+  mix elixir_make.precompile
+```
+
+To build the armv7 target locally:
 
 ```bash
 curl -fsSL https://github.com/nerves-project/toolchains/releases/download/v15.3.0/nerves_toolchain_armv7_nerves_linux_gnueabihf-linux_x86_64-15.3.0-9917D70.tar.xz | tar -xJ
@@ -125,7 +149,7 @@ MIX_ENV=prod \
   mix elixir_make.precompile
 ```
 
-#### The erts include directory is not optional
+#### The armv7 erts include directory is not optional
 
 `erl_int_sizes_config.h` is generated per architecture, and `erl_drv_nif.h`
 picks its 64-bit integer typedefs from it — `SIZEOF_LONG == 8` makes
@@ -156,8 +180,8 @@ with host values. Preprocessing `c_src/nx_eigen_nif.cpp` reaches none of it, but
 anything that starts including `erl_threads.h` or the ethread internals would
 be wrong in the same silent way, and the `static_assert`s would not catch it.
 
-The `scripts/precompile-docker.sh` flow does not cover this target: it builds
-natively in a container per architecture, while this one is cross-compiled.
+The `scripts/precompile-docker.sh` flow does not cover these targets: it builds
+natively in a container per architecture, while these are cross-compiled.
 
 #### How Nerves devices resolve a target
 
@@ -171,6 +195,13 @@ devices to the same `arm-linux-gnueabihf` triplet. `NxEigen.Precompiler` (in
 | `cortex_a7`    | `armv7-cortex-a7-linux-gnueabihf` | Yes       |
 | `arm1176*`     | `armv6-linux-gnueabihf`           | No        |
 | anything else  | `arm-linux-gnueabihf`             | No        |
+
+aarch64 Nerves exports `TARGET_ARCH=aarch64`, `TARGET_OS=linux` and
+`TARGET_ABI=gnu`, the same triplet as generic `aarch64-linux-gnu`. That binary
+links FFTW, which the rootfs does not have. A firmware build also sets
+`NERVES_SDK_SYSROOT`, and `NxEigen.Precompiler` then selects
+`aarch64-nerves-linux-gnu`. A desktop aarch64 build leaves the variable unset
+and keeps the generic binary.
 
 Unpublished targets fall back to `:ignore`, so boards we have not built for get
 no NIF rather than a binary that faults with an illegal instruction.
@@ -220,12 +251,17 @@ Precompiled binaries are automatically built on native runners when you push a v
 - `aarch64`: Runs on `ubuntu-22.04-arm` (native ARM64)
 - `aarch64-arduino-uno-q-linux-gnu`: Runs on `ubuntu-22.04-arm` (native ARM64, with `PRECOMPILE_TARGET` set)
 
+**Nerves builds** (cross-compiled on `ubuntu-22.04`):
+
+- `armv7-cortex-a7-linux-gnueabihf`: Nerves toolchain 15.3.0
+- `aarch64-nerves-linux-gnu`: Nerves toolchain 13.2.0
+
 **macOS builds**:
 
 - `x86_64`: Runs on `macos-15-intel` (native Intel)
 - `aarch64`: Runs on `macos-14` (native Apple Silicon)
 
-All builds use native architecture runners for maximum performance and reliability.
+The Linux and macOS jobs above run on native architecture runners.
 
 To trigger a build:
 
