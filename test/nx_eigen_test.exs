@@ -367,4 +367,60 @@ defmodule NxEigenTest do
     # 1*4 + 2*5 + 3*6 = 32
     assert Nx.to_number(result) == 32
   end
+
+  describe "dot - general contraction matches Nx.BinaryBackend" do
+    defp iota(shape), do: Nx.iota(shape, backend: Nx.BinaryBackend) |> Nx.subtract(5)
+
+    defp assert_dot_matches(left_shape, c1, b1, right_shape, c2, b2) do
+      left = iota(left_shape)
+      right = iota(right_shape)
+      expected = Nx.dot(left, c1, b1, right, c2, b2)
+
+      result =
+        Nx.dot(
+          Nx.backend_copy(left, NxEigen.Backend),
+          c1,
+          b1,
+          Nx.backend_copy(right, NxEigen.Backend),
+          c2,
+          b2
+        )
+
+      assert result.data.__struct__ == NxEigen.Backend
+      assert result.shape == expected.shape
+      assert Nx.to_list(result) == Nx.to_list(expected)
+    end
+
+    test "matrix-vector" do
+      assert_dot_matches({3, 4}, [1], [], {4}, [0], [])
+    end
+
+    test "vector-matrix" do
+      assert_dot_matches({3}, [0], [], {3, 4}, [0], [])
+    end
+
+    test "rank-3 tensor times vector" do
+      assert_dot_matches({2, 3, 4}, [2], [], {4}, [0], [])
+    end
+
+    test "contraction over two trailing axes" do
+      assert_dot_matches({2, 3, 4}, [1, 2], [], {3, 4, 5}, [0, 1], [])
+    end
+
+    test "batched matmul" do
+      assert_dot_matches({2, 3, 4}, [2], [0], {2, 4, 5}, [1], [0])
+    end
+
+    test "transposed left operand" do
+      assert_dot_matches({4, 3}, [0], [], {4, 5}, [0], [])
+    end
+
+    test "transposed right operand" do
+      assert_dot_matches({3, 4}, [1], [], {5, 4}, [1], [])
+    end
+
+    test "transposed operands in a batch" do
+      assert_dot_matches({2, 4, 3}, [1], [0], {2, 5, 4}, [2], [0])
+    end
+  end
 end
