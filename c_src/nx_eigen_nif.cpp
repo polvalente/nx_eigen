@@ -5446,87 +5446,114 @@ dot_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
         size_t total_out = batch_size * left_free_size * right_free_size;
         out_arr.resize(total_out);
 
-        // Allocate transposed buffers
-        FlatArray<T> left_transposed(left_arr.size());
-        FlatArray<T> right_transposed(right_arr.size());
+        // When an operand's axes are already in [batch, free, contract] (left)
+        // or [batch, contract, free] (right) order, its row-major buffer is
+        // the matrix the multiply needs, so it is used in place. This covers
+        // matrix-vector {m, k} . {k}, vector-matrix {k} . {k, n} and batched
+        // matmul in the standard layout, which otherwise paid for a full copy
+        // of the matrix on every call.
+        auto is_identity = [](const std::vector<int> &perm) {
+          for (size_t i = 0; i < perm.size(); ++i) {
+            if (perm[i] != static_cast<int>(i))
+              return false;
+          }
+          return true;
+        };
+        const bool left_in_place = is_identity(left_perm);
+        const bool right_in_place = is_identity(right_perm);
+
+        FlatArray<T> left_transposed;
+        FlatArray<T> right_transposed;
+        if (!left_in_place)
+          left_transposed.resize(left_arr.size());
+        if (!right_in_place)
+          right_transposed.resize(right_arr.size());
 
         // Transpose left: apply permutation to get [batch, free, contract]
         // order
-        std::vector<size_t> left_src_strides(left_rank);
-        size_t stride = 1;
-        for (int i = left_rank - 1; i >= 0; --i) {
-          left_src_strides[i] = stride;
-          stride *= left->shape[i];
-        }
+        if (!left_in_place) {
+          std::vector<size_t> left_src_strides(left_rank);
+          size_t stride = 1;
+          for (int i = left_rank - 1; i >= 0; --i) {
+            left_src_strides[i] = stride;
+            stride *= left->shape[i];
+          }
 
-        std::vector<int64_t> left_transposed_shape(left_rank);
-        for (int i = 0; i < left_rank; ++i) {
-          left_transposed_shape[i] = left->shape[left_perm[i]];
-        }
+          std::vector<int64_t> left_transposed_shape(left_rank);
+          for (int i = 0; i < left_rank; ++i) {
+            left_transposed_shape[i] = left->shape[left_perm[i]];
+          }
 
-        std::vector<size_t> left_dst_strides(left_rank);
-        stride = 1;
-        for (int i = left_rank - 1; i >= 0; --i) {
-          left_dst_strides[i] = stride;
-          stride *= left_transposed_shape[i];
-        }
+          std::vector<size_t> left_dst_strides(left_rank);
+          stride = 1;
+          for (int i = left_rank - 1; i >= 0; --i) {
+            left_dst_strides[i] = stride;
+            stride *= left_transposed_shape[i];
+          }
 
-        for (size_t src_idx = 0; src_idx < left_arr.size(); ++src_idx) {
-          // Decode src_idx to coordinates
           std::vector<size_t> coords(left_rank);
-          size_t temp = src_idx;
-          for (int d = left_rank - 1; d >= 0; --d) {
-            coords[d] = temp % left->shape[d];
-            temp /= left->shape[d];
-          }
+          for (size_t src_idx = 0; src_idx < left_arr.size(); ++src_idx) {
+            // Decode src_idx to coordinates
+            size_t temp = src_idx;
+            for (int d = left_rank - 1; d >= 0; --d) {
+              coords[d] = temp % left->shape[d];
+              temp /= left->shape[d];
+            }
 
-          // Apply permutation and encode to dst_idx
-          size_t dst_idx = 0;
-          for (int d = 0; d < left_rank; ++d) {
-            dst_idx += coords[left_perm[d]] * left_dst_strides[d];
-          }
+            // Apply permutation and encode to dst_idx
+            size_t dst_idx = 0;
+            for (int d = 0; d < left_rank; ++d) {
+              dst_idx += coords[left_perm[d]] * left_dst_strides[d];
+            }
 
-          left_transposed[dst_idx] = left_arr[src_idx];
+            left_transposed[dst_idx] = left_arr[src_idx];
+          }
         }
 
         // Transpose right: apply permutation to get [batch, contract, free]
         // order
-        std::vector<size_t> right_src_strides(right_rank);
-        stride = 1;
-        for (int i = right_rank - 1; i >= 0; --i) {
-          right_src_strides[i] = stride;
-          stride *= right->shape[i];
-        }
+        if (!right_in_place) {
+          std::vector<size_t> right_src_strides(right_rank);
+          size_t stride = 1;
+          for (int i = right_rank - 1; i >= 0; --i) {
+            right_src_strides[i] = stride;
+            stride *= right->shape[i];
+          }
 
-        std::vector<int64_t> right_transposed_shape(right_rank);
-        for (int i = 0; i < right_rank; ++i) {
-          right_transposed_shape[i] = right->shape[right_perm[i]];
-        }
+          std::vector<int64_t> right_transposed_shape(right_rank);
+          for (int i = 0; i < right_rank; ++i) {
+            right_transposed_shape[i] = right->shape[right_perm[i]];
+          }
 
-        std::vector<size_t> right_dst_strides(right_rank);
-        stride = 1;
-        for (int i = right_rank - 1; i >= 0; --i) {
-          right_dst_strides[i] = stride;
-          stride *= right_transposed_shape[i];
-        }
+          std::vector<size_t> right_dst_strides(right_rank);
+          stride = 1;
+          for (int i = right_rank - 1; i >= 0; --i) {
+            right_dst_strides[i] = stride;
+            stride *= right_transposed_shape[i];
+          }
 
-        for (size_t src_idx = 0; src_idx < right_arr.size(); ++src_idx) {
-          // Decode src_idx to coordinates
           std::vector<size_t> coords(right_rank);
-          size_t temp = src_idx;
-          for (int d = right_rank - 1; d >= 0; --d) {
-            coords[d] = temp % right->shape[d];
-            temp /= right->shape[d];
-          }
+          for (size_t src_idx = 0; src_idx < right_arr.size(); ++src_idx) {
+            // Decode src_idx to coordinates
+            size_t temp = src_idx;
+            for (int d = right_rank - 1; d >= 0; --d) {
+              coords[d] = temp % right->shape[d];
+              temp /= right->shape[d];
+            }
 
-          // Apply permutation and encode to dst_idx
-          size_t dst_idx = 0;
-          for (int d = 0; d < right_rank; ++d) {
-            dst_idx += coords[right_perm[d]] * right_dst_strides[d];
-          }
+            // Apply permutation and encode to dst_idx
+            size_t dst_idx = 0;
+            for (int d = 0; d < right_rank; ++d) {
+              dst_idx += coords[right_perm[d]] * right_dst_strides[d];
+            }
 
-          right_transposed[dst_idx] = right_arr[src_idx];
+            right_transposed[dst_idx] = right_arr[src_idx];
+          }
         }
+
+        T *left_data = left_in_place ? left_arr.data() : left_transposed.data();
+        T *right_data =
+            right_in_place ? right_arr.data() : right_transposed.data();
 
         // Now perform batched matrix multiplication
         // For each batch element: (left_free_size x contract_size) *
@@ -5539,11 +5566,10 @@ dot_nif(ErlNifEnv *env, fine::ResourcePtr<EigenTensor> left,
           // Map to Eigen matrices for this batch element
           Eigen::Map<
               Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
-              left_mat(left_transposed.data() + left_offset, left_free_size,
-                       contract_size);
+              left_mat(left_data + left_offset, left_free_size, contract_size);
           Eigen::Map<
               Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
-              right_mat(right_transposed.data() + right_offset, contract_size,
+              right_mat(right_data + right_offset, contract_size,
                         right_free_size);
           Eigen::Map<
               Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
